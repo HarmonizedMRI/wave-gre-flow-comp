@@ -1,0 +1,13 @@
+# Local path configuration
+seq/gre_flash_path_settings.json
+gre_flash_path_settings.json
+
+# Generated Pulseq files
+generated_seq_v141/
+generated_seq_v151/
+seq/generated_seq_v141/
+seq/generated_seq_v151/
+
+# MATLAB / OS transient files
+*.asv
+.DS_Store
