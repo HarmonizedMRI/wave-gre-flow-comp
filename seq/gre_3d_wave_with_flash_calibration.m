@@ -31,6 +31,8 @@
 %
 % Geometry is TRA for both acquisitions:
 %   RO=x, LIN=y/sine, PAR=z/cosine/slab-select.
+%   GRE and calibration LIN/PAR indices both map from negative to positive
+%   physical k-space as the MATLAB/TWIX array indices increase.
 %
 % The calibration slab rephaser is a standalone block and is not overlapped
 % with the following calibration PE/readout/wave gradients.
@@ -1946,10 +1948,29 @@ groCalPre = mr.makeTrapezoid(ax.d1, ...
     'Area', -groCal.amplitude * ...
         (adcCal.dwell*(adcCal.numSamples/2+0.5) + 0.5*groCal.riseTime), ...
     'system', sys_lowPNS);
+
+% Match the GRE physical PE convention exactly: increasing MATLAB/TWIX
+% indices correspond to increasing k-space coordinates, from negative to
+% positive. These are the desired PE moments at the ADC center for the
+% no-wave baseline of each calibration line.
+calibParAreas = ((0:N(ax.n2)-1) - N(ax.n2)/2) * deltak(ax.n2);
+calibLinAreas = ((0:N(ax.n3)-1) - N(ax.n3)/2) * deltak(ax.n3);
+calibParMaxAbsArea = max(abs(calibParAreas));
+calibLinMaxAbsArea = max(abs(calibLinAreas));
+
+assert(all(diff(calibParAreas) > 0), ...
+    'Calibration PAR target areas must increase from negative to positive.');
+assert(all(diff(calibLinAreas) > 0), ...
+    'Calibration LIN target areas must increase from negative to positive.');
+assert(abs(calibParAreas(floor(N(ax.n2)/2)+1)) < 1e-12, ...
+    'Calibration PAR center index must have zero PE area.');
+assert(abs(calibLinAreas(floor(N(ax.n3)/2)+1)) < 1e-12, ...
+    'Calibration LIN center index must have zero PE area.');
+
 gpeCalParMax = mr.makeTrapezoid(ax.d2, ...
-    'Area', -deltak(ax.n2)*(N(ax.n2)/2), 'system', sys_lowPNS);
+    'Area', calibParMaxAbsArea, 'system', sys_lowPNS);
 gpeCalLinMax = mr.makeTrapezoid(ax.d3, ...
-    'Area', -deltak(ax.n3)*(N(ax.n3)/2), 'system', sys_lowPNS);
+    'Area', calibLinMaxAbsArea, 'system', sys_lowPNS);
 
 [groCalRead, groCalSp] = mr.splitGradientAt( ...
     groCal, groCal.riseTime + groCal.flatTime);
@@ -1973,8 +1994,12 @@ groCalRead.delay = mr.calcDuration(groCalPre);
 adcCal.delay = groCalRead.delay + groCal.riseTime;
 groCalRead = mr.addGradients({groCalRead, groCalPre}, 'system', sys);
 
-calibParSteps = ((0:N(ax.n2)-1)-N(ax.n2)/2)/N(ax.n2)*2;
-calibLinSteps = ((0:N(ax.n3)-1)-N(ax.n3)/2)/N(ax.n3)*2;
+% Scale positive maximum-area templates to the signed physical target areas.
+% The first index is the most negative encoded location, the center index is
+% zero, and the final index is the most positive encoded location.
+calibParScales = calibParAreas / calibParMaxAbsArea;
+calibLinScales = calibLinAreas / calibLinMaxAbsArea;
+calibAreaTol = max(1e-9, 1e-10 * max([calibParMaxAbsArea, calibLinMaxAbsArea]));
 
 gpeCalParPre_nowave  = cell(1, N(ax.n2));
 gpeCalParPost_nowave = cell(1, N(ax.n2));
@@ -1988,10 +2013,14 @@ calibPostDurations = mr.calcDuration(groCalSp);
 
 % TRA mapping: PAR/z carries cosine; LIN/y carries sine.
 for izCal = 1:N(ax.n2)
-    gpePreNow = mr.scaleGrad(gpeCalParPreMax, calibParSteps(izCal));
+    gpePreNow = mr.scaleGrad(gpeCalParPreMax, calibParScales(izCal));
     gpeCalParPre_nowave{izCal} = gpePreNow;
     gpeCalParPost_nowave{izCal} = mr.scaleGrad( ...
-        gpeCalParMax, -calibParSteps(izCal));
+        gpeCalParMax, -calibParScales(izCal));
+    assert(abs(gpeCalParPre_nowave{izCal}.area - calibParAreas(izCal)) <= calibAreaTol, ...
+        'Calibration PAR prephaser area/order mismatch at index %d.', izCal);
+    assert(abs(gpeCalParPost_nowave{izCal}.area + calibParAreas(izCal)) <= calibAreaTol, ...
+        'Calibration PAR rewinder area mismatch at index %d.', izCal);
 
     debugThis = calibWaveDebugFlag && (izCal == 1);
     [gpeCalParPre_cos{izCal}, gpeCalParPost_cos{izCal}] = ...
@@ -2009,10 +2038,14 @@ for izCal = 1:N(ax.n2)
 end
 
 for iyCal = 1:N(ax.n3)
-    gpePreNow = mr.scaleGrad(gpeCalLinPreMax, calibLinSteps(iyCal));
+    gpePreNow = mr.scaleGrad(gpeCalLinPreMax, calibLinScales(iyCal));
     gpeCalLinPre_nowave{iyCal} = gpePreNow;
     gpeCalLinPost_nowave{iyCal} = mr.scaleGrad( ...
-        gpeCalLinMax, -calibLinSteps(iyCal));
+        gpeCalLinMax, -calibLinScales(iyCal));
+    assert(abs(gpeCalLinPre_nowave{iyCal}.area - calibLinAreas(iyCal)) <= calibAreaTol, ...
+        'Calibration LIN prephaser area/order mismatch at index %d.', iyCal);
+    assert(abs(gpeCalLinPost_nowave{iyCal}.area + calibLinAreas(iyCal)) <= calibAreaTol, ...
+        'Calibration LIN rewinder area mismatch at index %d.', iyCal);
 
     debugThis = calibWaveDebugFlag && (iyCal == 1);
     [gpeCalLinPre_sin{iyCal}, gpeCalLinPost_sin{iyCal}] = ...
@@ -2057,6 +2090,20 @@ kyCalAcs = centerBlockIndices(N(ax.n3), NacsCal);
 kzCal1 = centerBlockIndices(N(ax.n2), Ncalib1);
 kzCal2 = centerBlockIndices(N(ax.n2), Ncalib2);
 kzCalAcs = centerBlockIndices(N(ax.n2), NacsCal);
+
+% centerBlockIndices returns ascending physical indices. Combined with the
+% target-area arrays above, compact local LIN/PAR labels now map directly to
+% negative-to-positive physical k-space in every calibration SET.
+assert(all(diff(calibLinAreas(kyCal1)) > 0), ...
+    'Calibration LIN-wide block is not ordered negative-to-positive.');
+assert(all(diff(calibParAreas(kzCal1)) > 0), ...
+    'Calibration PAR-wide block is not ordered negative-to-positive.');
+assert(all(diff(calibLinAreas(kyCalAcs)) > 0), ...
+    'Calibration ACS LIN block is not ordered negative-to-positive.');
+assert(all(diff(calibParAreas(kzCalAcs)) > 0), ...
+    'Calibration ACS PAR block is not ordered negative-to-positive.');
+fprintf(['Calibration PE ordering: negative-to-positive for both LIN/y and ', ...
+    'PAR/z; compact local labels increase with physical k-space.\n']);
 
 calParts = struct('id', {}, 'name', {}, 'mode', {}, ...
     'kyList', {}, 'kzList', {}, 'isACS', {});
@@ -2333,40 +2380,101 @@ seq.setDefinition('CalibrationRefscanNPar', Ncalib1);
 seq.setDefinition('CalibrationAllSetsInRefscan', 1);
 seq.setDefinition('CalibrationACSSetID', 4);
 seq.setDefinition('CalibrationSlabRephaserSeparate', 1);
+seq.setDefinition('KspaceOrdering', 'negative_to_positive');
+
+%% Compact sequence filename
+% Keep the complete filename below the scanner interpreter's
+% 128-character limit, including the version suffix and ".seq".
+%
+% Example:
+% gre_3d_wave_FC_FOV220x220x180_res0p88x0p88x2p5_...
+% E1_Ry3_Rz1_os4_amp8_cyc10_TRA_prisma_v151.seq
+
+compactNum = @(x) strrep( ...
+    strrep(sprintf('%.4g', x), '.', 'p'), ...
+    '-', 'm');
+
+fov_mm = fov(:).' * 1e3;
+res_mm = fov(:).' ./ N(:).' * 1e3;
+
+fovTokens = arrayfun(compactNum, fov_mm, ...
+    'UniformOutput', false);
+resTokens = arrayfun(compactNum, res_mm, ...
+    'UniformOutput', false);
+
+fovString = strjoin(fovTokens, 'x');
+resString = strjoin(resTokens, 'x');
+
+if isUseFlowComp
+    fcString = 'FC';
+else
+    fcString = 'noFC';
+end
 
 if isUseWave_sin || isUseWave_cos
-    tag_wave = '_wave';
-    if isUseWave_sin, tag_wave = [tag_wave 'Ysin']; end
-    if isUseWave_cos, tag_wave = [tag_wave 'Zcos']; end
+    sequenceName = 'gre_3d_wave';
 else
-    tag_wave = '_nowave';
+    sequenceName = 'gre_3d_nowave';
 end
-if isUseFlowComp, tag_FC = '_FC'; else, tag_FC = '_noFC'; end
-res_mm = fov(:).' ./ N(:).' * 1e3;
-tag_res = ['_res' strrep(num2str(res_mm(1),'%.3g'),'.','p') 'x' ...
-    strrep(num2str(res_mm(2),'%.3g'),'.','p') 'x' ...
-    strrep(num2str(res_mm(3),'%.3g'),'.','p') 'mm'];
-seqFilename = ['gre_3d_flashcalib' tag_wave tag_FC '_' ...
-    num2str(Nx) 'x' num2str(Ny) 'x' num2str(Nz) tag_res ...
-    '_E' num2str(Nechoes) '_Ry' num2str(Ry) '_Rz' num2str(Rz) ...
-    '_cal' num2str(Ncalib1) 'x' num2str(Ncalib2) ...
-    '_acs' num2str(NacsCal) '_os' num2str(os_factor) ...
-    '_amp' num2str(gwave_max) '_cycles' num2str(Ncycles) ...
-    '_' slOrientation '_' sys_type];
-seq.setDefinition('Name', seqFilename);
 
+seqBaseName = sprintf( ...
+    ['%s_%s_FOV%s_res%s_E%d_' ...
+     'Ry%d_Rz%d_os%d_amp%s_cyc%d_%s_%s'], ...
+    sequenceName, ...
+    fcString, ...
+    fovString, ...
+    resString, ...
+    Nechoes, ...
+    Ry, ...
+    Rz, ...
+    os_factor, ...
+    compactNum(gwave_max), ...
+    Ncycles, ...
+    slOrientation, ...
+    sys_type);
+
+% Store the format-independent name in the sequence header.
+seq.setDefinition('Name', seqBaseName);
+
+%% Write sequence
 outDir_v141 = fullfile(out_path, 'generated_seq_v141');
 outDir_v151 = fullfile(out_path, 'generated_seq_v151');
-if write_v141_format && ~exist(outDir_v141,'dir'), mkdir(outDir_v141); end
-if ~exist(outDir_v151,'dir'), mkdir(outDir_v151); end
-if write_v141_format
-    seqFile_v141 = fullfile(outDir_v141, [seqFilename '_v141.seq']);
-    seq.write_v141(seqFile_v141);
-    fprintf('Write to file (v141): %s\n', seqFile_v141);
+
+if write_v141_format && ~exist(outDir_v141, 'dir')
+    mkdir(outDir_v141);
 end
-seqFile_v151 = fullfile(outDir_v151, [seqFilename '.seq']);
+
+if ~exist(outDir_v151, 'dir')
+    mkdir(outDir_v151);
+end
+
+fileName_v141 = [seqBaseName '_v141.seq'];
+fileName_v151 = [seqBaseName '_v151.seq'];
+
+% The scanner filename must contain fewer than 128 characters.
+assert(numel(fileName_v141) < 128, ...
+    ['The v141 sequence filename contains %d characters. ' ...
+     'It must contain fewer than 128 characters:\n%s'], ...
+    numel(fileName_v141), fileName_v141);
+
+assert(numel(fileName_v151) < 128, ...
+    ['The v151 sequence filename contains %d characters. ' ...
+     'It must contain fewer than 128 characters:\n%s'], ...
+    numel(fileName_v151), fileName_v151);
+
+if write_v141_format
+    seqFile_v141 = fullfile(outDir_v141, fileName_v141);
+    seq.write_v141(seqFile_v141);
+
+    fprintf('Write to file (v141, %d filename characters):\n%s\n', ...
+        numel(fileName_v141), seqFile_v141);
+end
+
+seqFile_v151 = fullfile(outDir_v151, fileName_v151);
 seq.write(seqFile_v151);
-fprintf('Write to file (current format): %s\n', seqFile_v151);
+
+fprintf('Write to file (v151, %d filename characters):\n%s\n', ...
+    numel(fileName_v151), seqFile_v151);
 
 %% Optional PNS/CNS and forbidden-frequency checks
 % The sequence is deliberately written before these optional checks.
