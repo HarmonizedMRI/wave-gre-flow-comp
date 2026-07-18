@@ -176,17 +176,11 @@ ax.n3 = strfind('xyz', ax.d3);
 
 % target_fov = [220 172 160] * 1e-3;           % [m]
 target_fov = [220 220 160] * 1e-3;           % [m]
-% target_N   = [256 192 64];
-% target_N   = [256 192 16];
 sliceOS    = 0.125;
 
 % Encoded z slab = 160 mm * (1 + 12.5%) = 180 mm, 64*(1+12.5%) = 72.
 % fov = [220 172 180] * 1e-3;                 % encoded FOV [m] (children)
 fov = [220 220 180] * 1e-3;                 % encoded FOV [m] (adults)
-% N   = [250 250 72];                         % encoded matrix [Nx Ny Nz]
-% N   = [250 2 72];                         % encoded matrix [Nx Ny Nz]  (cos)
-% N   = [250 72 2];                         % encoded matrix [Nx Ny Nz]  (sin)
-% N   = [250 32 32];                         % encoded matrix [Nx Ny Nz]  (lr)
 
 % Requested voxel size [x y z], in mm. The matrix N is derived from fov and
 % res, with each dimension rounded to the nearest even integer so that the
