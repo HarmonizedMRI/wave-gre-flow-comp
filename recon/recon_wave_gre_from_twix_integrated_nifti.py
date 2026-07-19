@@ -114,7 +114,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Optional tag appended to cached calibration and reconstruction files.",
     )
     parser.add_argument(
+        "--wave-mode",
         "--mode",
+        dest="mode",
         choices=("auto", "wave", "nowave"),
         default="auto",
         help=(
@@ -1072,14 +1074,18 @@ def fit_wave_psf_deviation_from_projection(
             return_quality_maps=True,
             verbose=False,
         )
-        a_fit_all.append(np.asarray(result["a_fit_all"]))
-        b_fit_all.append(np.asarray(result["b_fit_all"]))
-        c_fit_all.append(np.asarray(result["c_fit_all"]))
+        a_result = torch.as_tensor(result["a_fit_all"]).detach().cpu()
+        b_result = torch.as_tensor(result["b_fit_all"]).detach().cpu()
+        c_result = torch.as_tensor(result["c_fit_all"]).detach().cpu()
+
+        a_fit_all.append(a_result)
+        b_fit_all.append(b_result)
+        c_fit_all.append(c_result)
 
         suffix = _cache_suffix(file_tag)
-        np.save(out_folder / f"a_fit_all_{tag}{suffix}.npy", result["a_fit_all"])
-        np.save(out_folder / f"b_fit_all_{tag}{suffix}.npy", result["b_fit_all"])
-        np.save(out_folder / f"c_fit_all_{tag}{suffix}.npy", result["c_fit_all"])
+        np.save(out_folder / f"a_fit_all_{tag}{suffix}.npy", a_result.numpy())
+        np.save(out_folder / f"b_fit_all_{tag}{suffix}.npy", b_result.numpy())
+        np.save(out_folder / f"c_fit_all_{tag}{suffix}.npy", c_result.numpy())
 
     a_fit = a_fit_all[0]
     b_fit = b_fit_all[1]
@@ -1109,9 +1115,9 @@ def _build_phase_correction(
     nx_os = len(a_fit)
     correction = torch.empty((nx_os, ny, nz), dtype=design.dtype)
     for kx_idx in range(nx_os):
-        coeff = torch.tensor(
-            (a_fit[kx_idx], b_fit[kx_idx], c_fit[kx_idx]), dtype=design.dtype
-        )
+        coeff = torch.stack(
+            (a_fit[kx_idx], b_fit[kx_idx], c_fit[kx_idx])
+        ).to(dtype=design.dtype)
         correction[kx_idx] = (design @ coeff).view(ny, nz)
     return torch.nan_to_num(correction, nan=0.0).to(torch.float32)
 
