@@ -1,75 +1,202 @@
-# Wave-encoded multi-echo GRE with integrated FLASH calibration
+# Wave-encoded multi-echo GRE with flow compensation
 
-This bundle reorganizes the supplied multi-echo wave-GRE sequence into an open-source layout and appends a slab-selective FLASH wave-calibration acquisition to the same Pulseq sequence.
+Pulseq-based 3D single- or multi-echo Wave-GRE sequence generation with integrated FLASH wave calibration and Python reconstruction from Siemens TWIX data.
 
-## Main sequence
+The repository has two intentionally separate parts:
 
-Run:
+- MATLAB generates the integrated GRE + FLASH calibration sequence.
+- Python reconstructs wave or no-wave GRE data from the resulting Siemens TWIX measurement.
+
+`pyproject.toml` defines only the Python reconstruction environment. This repository is not configured as an installable Python package and does not need to be published to PyPI.
+
+## Repository layout
+
+```text
+.
+├── README.md
+├── pyproject.toml
+├── uv.lock
+├── .python-version
+├── docs/
+│   ├── sequence.md
+│   ├── reconstruction.md
+│   └── troubleshooting.md
+├── seq/
+│   ├── gre_3d_wave_with_flash_calibration.m
+│   └── utils/
+├── recon/
+│   ├── recon_wave_gre_from_twix_integrated_nifti.py
+│   └── utils/
+└── external/
+```
+
+Recommended entry points:
+
+```text
+seq/gre_3d_wave_with_flash_calibration.m
+recon/recon_wave_gre_from_twix_integrated_nifti.py
+```
+
+## Requirements
+
+### Sequence generation
+
+- MATLAB
+- Pulseq MATLAB toolbox
+
+Optional scanner-safety checks can use Safe PNS Prediction, a scanner `.asc` file, and an existing `forbiddenFreqCheck.m` helper.
+
+### Reconstruction
+
+- Python 3.11
+- CPU reconstruction dependencies defined in `pyproject.toml`
+- Optional NVIDIA GPU and CUDA 12-compatible CuPy for faster ESPIRiT calibration
+
+Current device behavior:
+
+| Step | Device |
+|---|---|
+| Coil-compression estimation and application | CPU |
+| ESPIRiT sensitivity-map calibration | GPU when available, otherwise CPU |
+| Wave/no-wave CG-SENSE | CPU |
+
+A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU.
+
+## Clone
+
+```bash
+git clone --recurse-submodules https://github.com/HarmonizedMRI/wave-gre-flow-comp.git
+cd wave-gre-flow-comp
+```
+
+## Install the reconstruction environment
+
+### Recommended: uv
+
+Install `uv`, then create the locked CPU-capable environment:
+
+```bash
+uv sync --locked
+```
+
+Run commands inside the environment with `uv run`:
+
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py --help
+```
+
+To include CUDA 12 CuPy for GPU-assisted ESPIRiT:
+
+```bash
+uv sync --locked --group gpu
+```
+
+The committed `uv.lock` records the exact resolved Python dependencies. The host NVIDIA driver and GPU remain system requirements and are not included in the lockfile.
+
+### Alternative: pip
+
+`pip` 25.1 or newer can install the standardized dependency groups from `pyproject.toml`:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade "pip>=25.1"
+python -m pip install --group recon
+```
+
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+For CUDA 12 CuPy:
+
+```bash
+python -m pip install --group gpu
+```
+
+The `pip` route resolves compatible versions at installation time. Use `uv sync --locked` when exact lockfile reproduction is important.
+
+## Generate the integrated sequence
+
+Open MATLAB and run:
 
 ```matlab
 cd seq
 gre_3d_wave_with_flash_calibration
 ```
 
-The first run prompts for the Pulseq path, optional Safe PNS path, output path, and optional scanner `.asc` file. Settings are saved locally in `seq/gre_flash_path_settings.json`. Pressing Enter for the output path uses MATLAB's current folder. Later runs can reuse all saved settings or update selected entries.
+On the first run, enter the requested paths. Machine-specific settings are saved beside the script in:
 
-Generated sequence files are written to `generated_seq_v141/` and `generated_seq_v151/` under the selected output root.
+```text
+seq/gre_flash_path_settings.json
+```
 
-## Acquisition order and TWIX routing
+Leaving the output path blank uses MATLAB's current folder. Generated sequence files are written under:
 
-1. Multi-echo GRE image acquisition
-   - `REF=false`, `IMA=false`, `SET=0`
-   - global `LIN`/`PAR`, `ECO=0:(Nechoes-1)`, `AVG=0:(naverage-1)`
-   - stored in TWIX `image`
-2. FLASH calibration acquisition
-   - `REF=true`, `IMA=false`, `ECO=0`, `AVG=0`
-   - compact local `LIN`/`PAR` within `SET=0:4`
-   - stored in TWIX `refscan`
+```text
+generated_seq_v141/
+generated_seq_v151/
+```
 
-Default calibration sets:
+See [Sequence generation](docs/sequence.md) for acquisition order, calibration SET layout, geometry, flow compensation, path handling, and output behavior.
 
-| SET | Acquisition | Local size |
-|---:|---|---:|
-| 0 | no-wave, LIN-wide / PAR-narrow | 72 × 1 |
-| 1 | sine-wave, LIN-wide / PAR-narrow | 72 × 1 |
-| 2 | no-wave, PAR-wide / LIN-narrow | 1 × 72 |
-| 3 | cosine-wave, PAR-wide / LIN-narrow | 1 × 72 |
-| 4 | no-wave ACS | 32 × 32 |
+## Reconstruct an integrated acquisition
 
-The logical calibration extent is `LIN × PAR × SET = 72 × 72 × 5`. Depending on loader axis order, a typical raw layout is approximately `Nx_os × Ncoil × 72 × 72 × 5`.
+The measurement is expected to contain:
 
-## Geometry
+```text
+image    -> single- or multi-echo GRE k-space
+refscan  -> four FLASH projection-calibration sets plus one ACS set
+```
 
-Both GRE and calibration use transverse mapping:
+Review all command-line arguments:
 
-- readout: `x`
-- LIN / sine wave: `y`
-- PAR / cosine wave / slab selection: `z`
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py --help
+```
 
-The calibration uses the same slab-selective sinc excitation parameters and FOV as GRE. Its slab rephaser is placed in a standalone block and is not overlapped with the following PE/readout/wave gradients.
+Typical reconstruction with automatic wave/no-wave detection, automatic ESPIRiT device selection, and NIfTI export:
 
-## Flow compensation
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
+    --twix /path/to/meas_wave_gre.dat \
+    --seq /path/to/matching_wave_gre.seq \
+    --out /path/to/reconstruction \
+    --wave-mode auto \
+    --espirit-device auto \
+    --save-nifti \
+    --save-nifti-phase
+```
 
-All GRE flow-compensation flags default to `true`, including initial readout, sine, cosine, PE-y, PAR-z, slab-rephaser, inter-echo, and cosine endpoint M1 corrections. `sys_lowPNS2` is preserved for the FC waveform design. Inter-echo modules are instantiated when the selected `TE` array contains more than one echo.
+Force a fully CPU-capable run:
 
-## Helper organization
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
+    --twix /path/to/meas_wave_gre.dat \
+    --seq /path/to/matching_wave_gre.seq \
+    --out /path/to/reconstruction \
+    --wave-mode auto \
+    --espirit-device cpu
+```
 
-- GRE wave and flow-compensation helpers were extracted from the supplied GRE script into individual files without changing their numerical bodies, except that the ADC block helper now accepts an explicit `SET` label.
-- Calibration wave helpers are based on the Wave-MPRAGE utility implementations and are renamed with `4Calib` to avoid collision with the GRE helpers:
-  - `defineCosineWaveGradient4Calib.m`
-  - `defineSineWaveGradient4Calib.m`
-  - `makeFixedDurationPreRamp4Calib.m`
-  - `makeExtendedTrapezoidAndWaveform4Calib.m`
+Use `--espirit-device gpu --espirit-gpu-index 0` to require a specific GPU. Explicit GPU mode raises an error instead of silently falling back when the requested GPU is unavailable.
+
+See [Reconstruction](docs/reconstruction.md) for supported acquisition assumptions, the pipeline, complete argument guidance, cache reuse, outputs, and NIfTI conventions.
+
+## Documentation
+
+- [Sequence generation](docs/sequence.md)
+- [Reconstruction](docs/reconstruction.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
 ## Attribution
 
 Author: Yiyun Dong, Athinoula A. Martinos Center for Biomedical Imaging.
 
-The GRE implementation is built based on Berkin's GRE code:
+The GRE implementation is based on Berkin's GRE code in the HarmonizedMRI `megre_label` repository. The integrated calibration organization and path-setting workflow follow the Wave-MPRAGE project.
 
-`https://github.com/HarmonizedMRI/megre_label/blob/main/script_writeGradientEcho3D_label_spoil_github_v0.m`
+## License
 
-The integration pattern, path-setting behavior, and calibration utility organization follow:
-
-`https://github.com/HarmonizedMRI/wave-mprage`
-
+MIT License. See `LICENSE`.
