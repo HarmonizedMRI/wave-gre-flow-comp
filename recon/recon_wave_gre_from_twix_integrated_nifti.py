@@ -204,7 +204,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--nifti-axis-flips",
         nargs=3,
         type=_parse_bool,
-        default=(False, False, False),
+        default=(False, True, False),
         metavar=("FLIP0", "FLIP1", "FLIP2"),
         help=(
             "Physical array flips applied before NIfTI saving. The GRE default is no "
