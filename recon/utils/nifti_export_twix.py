@@ -389,8 +389,9 @@ def save_nifti_with_json(
     nii_path: str | Path,
     json_path: str | Path,
     metadata: Mapping[str, Any] | None = None,
+    expected_voxel_size_mm: Sequence[float] | None = None,
 ) -> tuple[Path, Path]:
-    """Save one 3D float image to NIfTI plus a JSON sidecar."""
+    """Save NIfTI/JSON and verify mm units, spacing, qform, and sform."""
     try:
         import nibabel as nib
     except ImportError as exc:
@@ -401,25 +402,121 @@ def save_nifti_with_json(
     nii_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
 
-    img = nib.Nifti1Image(np.asarray(image, dtype=np.float32), np.asarray(affine, dtype=float))
+    image_affine = np.asarray(affine, dtype=float)
+    img = nib.Nifti1Image(np.asarray(image, dtype=np.float32), image_affine)
     img.header.set_xyzt_units(xyz="mm", t="sec")
-    voxel_size_mm = tuple(float(x) for x in nib.affines.voxel_sizes(img.affine))
-    img.header.set_zooms(voxel_size_mm)
+    affine_voxel_size_mm = tuple(
+        float(x) for x in nib.affines.voxel_sizes(img.affine)
+    )
+    img.header.set_zooms(affine_voxel_size_mm)
     img.set_qform(img.affine, code=1)
     img.set_sform(img.affine, code=1)
     nib.save(img, str(nii_path))
 
+    saved = nib.load(str(nii_path))
+    spatial_unit, temporal_unit = saved.header.get_xyzt_units()
+    raw_xyzt_units = int(saved.header["xyzt_units"])
+    saved_zooms = tuple(float(v) for v in saved.header.get_zooms()[:3])
+    saved_affine_zooms = tuple(
+        float(v) for v in nib.affines.voxel_sizes(saved.affine)
+    )
+    expected = (
+        tuple(float(v) for v in expected_voxel_size_mm)
+        if expected_voxel_size_mm is not None
+        else affine_voxel_size_mm
+    )
+    if len(expected) != 3:
+        raise ValueError("expected_voxel_size_mm must contain three values.")
+    expected_array = np.asarray(expected, dtype=float)
+    if (
+        not np.all(np.isfinite(expected_array))
+        or np.any(expected_array <= 0)
+        or np.any(expected_array < 0.05)
+        or np.any(expected_array > 20.0)
+    ):
+        raise RuntimeError(
+            "Implausible saved NIfTI spacing in millimetres: "
+            f"{expected}. This commonly indicates an m/mm/um conversion error."
+        )
+    if spatial_unit != "mm":
+        raise RuntimeError(
+            f"Saved NIfTI spatial unit is {spatial_unit!r}, expected 'mm' "
+            f"(raw xyzt_units={raw_xyzt_units})."
+        )
+    if not np.allclose(saved_zooms, expected, rtol=1e-5, atol=1e-4):
+        raise RuntimeError(
+            "Saved NIfTI header spacing does not match sequence spacing: "
+            f"header={saved_zooms}, expected={expected} mm."
+        )
+    if not np.allclose(saved_affine_zooms, expected, rtol=1e-5, atol=1e-4):
+        raise RuntimeError(
+            "Saved NIfTI affine spacing does not match sequence spacing: "
+            f"affine={saved_affine_zooms}, expected={expected} mm."
+        )
+
+    qform, qform_code = saved.get_qform(coded=True)
+    sform, sform_code = saved.get_sform(coded=True)
+    if qform is None or int(qform_code) == 0:
+        raise RuntimeError("Saved NIfTI qform is missing or has code 0.")
+    if sform is None or int(sform_code) == 0:
+        raise RuntimeError("Saved NIfTI sform is missing or has code 0.")
+
+    # sform stores the authoritative full affine; tolerate NIfTI-1 float32 round-off.
+    sform_max_abs_error = float(np.max(np.abs(sform - saved.affine)))
+    if not np.allclose(sform, saved.affine, rtol=1e-5, atol=1e-4):
+        raise RuntimeError(
+            "Saved NIfTI sform does not match the image affine. "
+            f"Maximum absolute difference: {sform_max_abs_error:.6g} mm."
+        )
+
+    # qform is quaternion-based and may approximate a slightly non-orthogonal affine.
+    qform_voxel_size_mm = tuple(float(v) for v in nib.affines.voxel_sizes(qform))
+    qform_orientation = tuple(nib.aff2axcodes(qform))
+    saved_orientation = tuple(nib.aff2axcodes(saved.affine))
+    qform_max_abs_error = float(np.max(np.abs(qform - saved.affine)))
+    if not np.allclose(qform_voxel_size_mm, expected, rtol=1e-5, atol=1e-4):
+        raise RuntimeError(
+            "Saved NIfTI qform voxel sizes do not match sequence spacing: "
+            f"qform={qform_voxel_size_mm}, expected={expected} mm."
+        )
+    if qform_orientation != saved_orientation:
+        raise RuntimeError(
+            "Saved NIfTI qform orientation does not match the sform affine: "
+            f"qform={qform_orientation}, sform={saved_orientation}."
+        )
+    if not np.allclose(qform, saved.affine, rtol=1e-5, atol=1e-4):
+        print(
+            "NIfTI note: qform is an approximate quaternion representation of "
+            "the full sform affine "
+            f"(maximum element difference={qform_max_abs_error:.6g} mm)."
+        )
+
     sidecar = dict(metadata or {})
-    with open(json_path, "w") as f:
+    sidecar["NIfTIHeaderValidation"] = {
+        "Passed": True,
+        "RawXYZTUnitsCode": raw_xyzt_units,
+        "SpatialUnit": spatial_unit,
+        "TemporalUnit": temporal_unit,
+        "ExpectedVoxelSizeMm": list(expected),
+        "HeaderVoxelSizeMm": list(saved_zooms),
+        "AffineVoxelSizeMm": list(saved_affine_zooms),
+        "QFormCode": int(qform_code),
+        "SFormCode": int(sform_code),
+        "OrientationCodes": list(saved_orientation),
+        "SFormMaxAbsDifferenceMm": sform_max_abs_error,
+        "QFormMaxAbsDifferenceMm": qform_max_abs_error,
+        "QFormVoxelSizeMm": list(qform_voxel_size_mm),
+        "QFormOrientationCodes": list(qform_orientation),
+    }
+    with json_path.open("w") as f:
         json.dump(sidecar, f, indent=2)
 
     print(f"Saved NIfTI: {nii_path}")
     print(f"Saved JSON:  {json_path}")
-    print(f"Saved shape: {img.shape}")
-    print(f"Saved voxel size: {voxel_size_mm}")
-    print(f"Saved orientation: {nib.aff2axcodes(img.affine)}")
+    print(f"Saved shape: {saved.shape}")
+    print(f"Saved voxel size: {saved_zooms} mm")
+    print(f"Saved orientation: {saved_orientation}")
     return nii_path, json_path
-
 
 def print_twix_orientation_summary(affine: np.ndarray, twix_info: Mapping[str, Any]) -> None:
     """Print a compact Twix-derived affine/orientation summary."""
