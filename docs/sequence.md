@@ -112,6 +112,16 @@ The GRE reconstruction currently supports this transverse orientation only. Use 
 
 The calibration uses the same FOV and slab-selective excitation convention as the GRE acquisition. Its slab rephaser is placed in a standalone block rather than overlapping the following phase-encoding, readout, or wave gradients.
 
+## Scanner protocol UI recommendations
+
+For the verified transverse acquisition:
+
+- set the in-plane phase-encoding direction to right-to-left (`R -> L`);
+- disable neck-coil elements when they are not required for the target anatomy, because strong neck or shoulder signal can contaminate the projection calibration and wave reconstruction;
+- ensure that the prescribed FOV box covers the complete signal-producing anatomy. Signal outside the FOV can wrap into the acquisition, and the resulting wave-induced aliasing may not be fully resolvable.
+
+Confirm the displayed phase-encoding direction on the scanner UI and follow local coil-selection and safety procedures. Keep the exact generated `.seq` file with the acquired TWIX data.
+
 ## Wave and no-wave acquisitions
 
 The sequence can generate a two-axis wave acquisition or a fully no-wave acquisition. The reconstruction supports:
@@ -173,4 +183,7 @@ Review the generated sequence using the validation tools appropriate for the sca
 - the output Pulseq format is supported by the scanner;
 - the filename can be interpreted by the scanner environment;
 - the prescribed orientation is transverse;
+- the scanner phase-encoding direction is `R -> L`;
+- unnecessary neck-coil elements are disabled;
+- the FOV box covers the complete signal-producing volume;
 - the `.seq` file is retained with the acquired TWIX data.

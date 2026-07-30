@@ -60,7 +60,7 @@ Current device behavior:
 | ESPIRiT sensitivity-map calibration | GPU when available, otherwise CPU |
 | Wave/no-wave CG-SENSE | CPU |
 
-A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU.
+A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU. For acquisitions with more than 32 physical receiver channels, consider `--espirit-device cpu` when GPU memory is limited or CPU resources are more suitable.
 
 ## Clone
 
@@ -142,6 +142,16 @@ generated_seq_v151/
 
 See [Sequence generation](docs/sequence.md) for acquisition order, calibration SET layout, geometry, flow compensation, path handling, and output behavior.
 
+### Scanner protocol recommendations
+
+For the verified transverse Wave-GRE workflow:
+
+- prescribe phase encoding right-to-left (`R -> L`);
+- disable neck-coil elements when they are not needed for the target anatomy, to reduce neck and shoulder signal contamination;
+- place the FOV box so it covers the complete signal-producing volume. Anatomy outside the prescribed FOV can wrap into the acquisition, and wave-induced aliasing from that signal may not be fully resolved.
+
+Follow local scanner-safety and coil-selection procedures.
+
 ## Reconstruct an integrated acquisition
 
 The measurement is expected to contain:
@@ -183,7 +193,7 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
 
 Use `--espirit-device gpu --espirit-gpu-index 0` to require a specific GPU. Explicit GPU mode raises an error instead of silently falling back when the requested GPU is unavailable.
 
-See [Reconstruction](docs/reconstruction.md) for supported acquisition assumptions, the pipeline, complete argument guidance, cache reuse, outputs, and NIfTI conventions.
+See [Reconstruction](docs/reconstruction.md) for supported acquisition assumptions, the pipeline, complete argument guidance, cache reuse, outputs, and NIfTI conventions. If the default PSF coefficient fit becomes unstable outside a trusted readout region, the optional `sine-line` processing mode can extrapolate from a user-specified high-fidelity kx interval; see [Reconstruction](docs/reconstruction.md#psf-coefficient-processing) and [Troubleshooting](docs/troubleshooting.md#psf-coefficient-fit-becomes-unstable-or-blows-up).
 
 ## Documentation
 

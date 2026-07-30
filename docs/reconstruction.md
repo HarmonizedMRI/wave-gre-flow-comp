@@ -51,6 +51,8 @@ The current verified reconstruction expects:
 
 Sine-only and cosine-only wave image acquisitions are rejected.
 
+At the beginning of a normal reconstruction, the updated code prints warning-only `.seq`/TWIX geometry diagnostics. These compare FOV and received dimensions, retain the verified transverse assertion, and report readout, LIN phase-encoding, and PAR phase-encoding directions. A mismatch is reported for investigation but does not stop reconstruction.
+
 ## Basic commands
 
 ### Automatic wave/no-wave detection
@@ -101,9 +103,9 @@ This checks the sequence trajectory and definitions without loading imaging data
 7. Generate low-resolution ESPIRiT maps on the selected CPU or GPU device.
 8. Interpolate and normalize the sensitivity maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
-10. For wave data, fit FLASH projection phase deviations and construct calibrated echo-specific PSFs.
+10. For wave data, fit FLASH projection phase deviations, process the fitted PSF coefficients using the selected method, and construct calibrated echo-specific PSFs.
 11. Run wave or no-wave CG-SENSE on CPU for each echo.
-12. Save NumPy arrays, diagnostic plots, and optional NIfTI outputs.
+12. Save NumPy arrays, diagnostic plots, geometry metadata, and optional NIfTI outputs.
 
 ## CPU and GPU behavior
 
@@ -129,6 +131,8 @@ In `auto` mode, missing CuPy, CUDA initialization failures, or the absence of a 
 
 CuPy is therefore optional for CPU reconstruction. Install the `gpu` dependency group only on a CUDA 12 system where GPU-assisted ESPIRiT is desired.
 
+For data acquired with more than 32 physical receiver channels, consider explicitly using `--espirit-device cpu`, depending on available CPU RAM, CPU performance, and GPU memory. GPU ESPIRiT can still be appropriate on a sufficiently large GPU, but `cpu` avoids GPU-memory pressure and CUDA-specific failures.
+
 ## Main reconstruction options
 
 | Option | Default | Purpose |
@@ -143,10 +147,50 @@ CuPy is therefore optional for CPU reconstruction. Install the `gpu` dependency 
 | `--cg-tol VALUE` | `1e-6` | Relative CG stopping tolerance |
 | `--yflip {-1,1}` | sequence-derived | Override LIN PSF sign |
 | `--zflip {-1,1}` | sequence-derived | Override PAR PSF sign |
+| `--psf-coefficient-processing {smooth,sine-line}` | `smooth` | Select PSF coefficient post-processing for wave data |
+| `--psf-fit-kx-min N` | none | Inclusive first oversampled-readout index for `sine-line` fitting |
+| `--psf-fit-kx-max N` | none | Exclusive final oversampled-readout index for `sine-line` fitting |
 | `--save-echo-npy` | off | Save one complex NumPy file per echo |
 | `--validate-only` | off | Validate sequence-derived configuration without reading TWIX |
 
 Use `--help` as the authoritative complete argument reference for the checked-out code.
+
+## PSF coefficient processing
+
+Wave calibration first estimates the readout-dependent phase-plane coefficients `a(kx)`, `b(kx)`, and `c(kx)`. The reconstruction provides two mutually exclusive post-processing methods.
+
+### `smooth` — default
+
+```text
+--psf-coefficient-processing smooth
+```
+
+This preserves the normal reconstruction path: each raw coefficient curve is processed with the existing NaN-aware moving-average smoothing. No kx bounds are required.
+
+### `sine-line` — optional fallback for an unstable fit
+
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
+    --twix /path/to/scan.dat \
+    --seq /path/to/scan.seq \
+    --out /path/to/recon \
+    --wave-mode auto \
+    --psf-coefficient-processing sine-line \
+    --psf-fit-kx-min 200 \
+    --psf-fit-kx-max 512
+```
+
+Use this option when the normally fitted coefficient curves become unstable or blow up outside a region that is known to have reliable calibration signal. The user must identify a high-fidelity oversampled-readout interval and provide both bounds. The interval follows the half-open convention:
+
+```text
+[kx_min, kx_max)
+```
+
+The sine-plus-line model is fitted independently to `a(kx)`, `b(kx)`, and `c(kx)` inside that interval, then evaluated over the full oversampled readout. In this mode, the fitted model **replaces** smoothing; it is not smoothed again. The same calibrated phase-deviation correction is combined with the echo-specific theoretical PSF for every echo.
+
+Before using `sine-line`, first rule out a mismatched `.seq` file, incorrect PSF signs, incomplete FOV coverage, and neck/shoulder signal contamination. Inspect the raw coefficient plots and choose bounds that contain only the stable, high-fidelity portion. The code does not determine this interval automatically.
+
+Selecting `sine-line` without both bounds is an error. Passing kx bounds while using `smooth` is also rejected so that options are not silently ignored.
 
 ## Coil-calibration cache
 
@@ -160,7 +204,7 @@ csm_full_mag_ncc<N><tag>.png
 csm_full_phase_ncc<N><tag>.png
 ```
 
-`--reuse-coil-calib` reuses the coil-compression matrix and full-resolution CSM only when both required cache files are present. The script validates their dimensions before use.
+`--reuse-coil-calib` reuses the coil-compression matrix and full-resolution CSM only when both required cache files are present. The script validates their dimensions before use. This is useful when ESPIRiT and coil-compression files were generated successfully but a later PSF, CG-SENSE, or output step failed. Rerun with the same output folder, `--file-tag`, `--ncc`, coil configuration, ACS, and geometry.
 
 Reuse cached files only when the following are unchanged:
 
@@ -214,7 +258,9 @@ Relevant options:
 --twix-use-fov-for-voxel-size
 ```
 
-The NIfTI helper uses Siemens TWIX geometry to build the affine and center-crops readout oversampling for NIfTI output. Verify orientation in an independent viewer before quantitative use.
+The NIfTI helper uses Siemens TWIX geometry to build the affine and center-crops readout oversampling for NIfTI output. Spatial units are written in millimetres and temporal units in seconds. Each saved NIfTI is reopened to validate header spacing, affine spacing, qform/sform codes, authoritative sform agreement, and qform orientation/voxel size. Expected quaternion round-off is tolerated.
+
+The JSON sidecar records sequence-derived metadata, warning-only `.seq`/TWIX geometry diagnostics, and readout/LIN/PAR direction information. Verify orientation in an independent viewer before quantitative use.
 
 ## Outputs
 

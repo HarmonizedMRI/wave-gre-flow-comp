@@ -93,6 +93,16 @@ CPU fallback prioritizes portability rather than speed. ESPIRiT operates on a re
 
 After generating compatible maps once, `--reuse-coil-calib` can avoid repeating calibration.
 
+### More than 32 receiver channels
+
+With more than 32 physical receiver channels, ESPIRiT may place substantial pressure on GPU memory even though the calibration volume is reduced and coil-compressed. Depending on the available hardware, consider:
+
+```text
+--espirit-device cpu
+```
+
+CPU execution may be slower, but it avoids GPU-memory limitations and CUDA-specific failures. A large-memory GPU can still be preferable; select the device based on available CPU RAM, CPU performance, GPU memory, and expected runtime.
+
 ## Input and sequence validation
 
 ### `--validate-only` still asks for `--twix` and `--out`
@@ -188,7 +198,53 @@ The reconstruction derives `yflip` and `zflip` from `KspaceOrdering`. Manual ove
 
 A mismatch often indicates that the wrong `.seq` file was paired with the TWIX data.
 
+### PSF coefficient fit becomes unstable or blows up
+
+The default processing is:
+
+```text
+--psf-coefficient-processing smooth
+```
+
+First verify the matching `.seq` file, sequence-derived PSF signs, calibration SET layout, and raw PSF diagnostic plots. Also check acquisition setup: neck or shoulder signal contamination and anatomy outside the prescribed FOV can corrupt part of the projection calibration.
+
+When `a(kx)`, `b(kx)`, or `c(kx)` is reliable only over a known high-fidelity readout interval, use the optional sine-plus-line substitution:
+
+```bash
+--psf-coefficient-processing sine-line \
+--psf-fit-kx-min 200 \
+--psf-fit-kx-max 512
+```
+
+The range is half-open, `[kx_min, kx_max)`, and refers to oversampled-readout indices. Choose the bounds from the stable part of the raw coefficient curves. The model is fitted inside that interval and extrapolated across the complete readout. It replaces smoothing and is not followed by another smoothing step. Both bounds are required.
+
+Do not use `sine-line` merely to hide a mismatched sequence, incorrect ordering, or poor acquisition coverage.
+
+## Acquisition setup
+
+### Neck or shoulder signal contaminates wave calibration
+
+When neck-coil elements are not required for the target anatomy, disable them in the scanner protocol UI. Strong neck or shoulder signal can enter the FLASH projection calibration and contaminate the fitted PSF coefficients. Follow local coil-selection and safety procedures.
+
+### Anatomy extends outside the FOV box
+
+Prescribe the FOV box to cover the complete signal-producing volume. Signal outside the FOV can wrap into the image, and the corresponding wave-induced aliasing may not be fully resolvable by the reconstruction. Increasing only the reconstruction matrix does not recover anatomy that was acquired outside the prescribed FOV.
+
+### Phase-encoding direction is not R-to-L
+
+The verified transverse Wave-GRE protocol uses right-to-left phase encoding (`R -> L`). Confirm this setting on the scanner UI before acquisition. If a different direction was used, review the sequence/TWIX direction diagnostics and do not assume the verified orientation and aliasing behavior applies unchanged.
+
 ## Coil-calibration cache
+
+### Reconstruction failed after ESPIRiT maps were generated
+
+When coil compression and ESPIRiT completed successfully but a later PSF, CG-SENSE, or output step failed, rerun with:
+
+```text
+--reuse-coil-calib
+```
+
+The correct option name is `--reuse-coil-calib`—not `--reuse-exist-calib`. Use the same output folder, `--file-tag`, `--ncc`, receiver-coil configuration, integrated ACS, matrix, FOV, and sequence geometry. The script checks cache dimensions, but the filename cannot encode every acquisition property.
 
 ### Cached calibration shape error
 
@@ -250,6 +306,12 @@ or:
 ```bash
 python -m pip install --group recon
 ```
+
+### NIfTI spacing appears to be in micrometres
+
+The updated export path writes spatial units as millimetres and reopens each file to verify header and affine spacing. Review the printed NIfTI validation report and the JSON sidecar. For a nominal 1 mm acquisition, header and affine voxel sizes should be close to `1.0`, not `0.001`.
+
+Use `--twix-use-fov-for-voxel-size` only as a deliberate diagnostic override. The normal spacing source is the sequence geometry after comparison with TWIX.
 
 ### NIfTI appears flipped or rotated
 
