@@ -149,6 +149,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=0,
         help="CUDA device index used when ESPIRiT runs on GPU.",
     )
+    parser.add_argument(
+        "--espirit-crop",
+        type=float,
+        default=0.8,
+        help=(
+            "ESPIRiT eigenvalue crop threshold. Lower values generally retain "
+            "a larger sensitivity-map support region."
+        ),
+    )
     parser.add_argument("--cg-iters", type=int, default=50, help="Maximum CG iterations.")
     parser.add_argument("--cg-tol", type=float, default=1e-6, help="Relative CG tolerance.")
     parser.add_argument(
@@ -287,6 +296,8 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         raise ValueError("--cg-iters must be positive.")
     if args.cg_tol <= 0:
         raise ValueError("--cg-tol must be positive.")
+    if not np.isfinite(args.espirit_crop) or not 0.0 <= args.espirit_crop <= 1.0:
+        raise ValueError("--espirit-crop must be a finite value between 0 and 1.")
 
     psf_processing = str(args.psf_coefficient_processing).strip().lower()
     fit_kx_min = args.psf_fit_kx_min
@@ -324,6 +335,7 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "reuse_coil_calib": bool(args.reuse_coil_calib),
         "espirit_device": args.espirit_device,
         "espirit_gpu_index": int(args.espirit_gpu_index),
+        "espirit_crop": float(args.espirit_crop),
         "cg_iters": int(args.cg_iters),
         "cg_tol": float(args.cg_tol),
         "yflip_override": args.yflip,
@@ -844,10 +856,15 @@ def load_or_generate_coil_sens(
     reuse_coil_calib: bool,
     espirit_device: str,
     espirit_gpu_index: int,
+    espirit_crop: float,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     paths = _coil_cache_paths(out_folder, file_tag, ncc)
     if reuse_coil_calib and paths["wcc"].is_file() and paths["csm_full"].is_file():
         print("Loading cached coil-compression matrix and sensitivity maps...")
+        print(
+            f"ESPIRiT crop threshold {espirit_crop:g} is not reapplied "
+            "because cached sensitivity maps are being reused."
+        )
         wcc = np.load(paths["wcc"])
         csm_full = np.load(paths["csm_full"])
         ref = _check_integrated_refscan_shape(
@@ -870,6 +887,7 @@ def load_or_generate_coil_sens(
         ncc=ncc,
         espirit_device=espirit_device,
         espirit_gpu_index=espirit_gpu_index,
+        espirit_crop=espirit_crop,
     )
 
 
@@ -901,7 +919,13 @@ def generate_coil_sens(
     ncc: int,
     espirit_device: str,
     espirit_gpu_index: int,
+    espirit_crop: float,
 ) -> tuple[np.ndarray, np.ndarray, int]:
+    espirit_crop = float(espirit_crop)
+    if not np.isfinite(espirit_crop) or not 0.0 <= espirit_crop <= 1.0:
+        raise ValueError("espirit_crop must be a finite value between 0 and 1.")
+
+    print(f"ESPIRiT crop threshold: {espirit_crop:g}")
     device, using_gpu = _select_espirit_device(espirit_device, espirit_gpu_index)
     ref = _check_integrated_refscan_shape(
         load_ref(str(twix_file)),
@@ -957,7 +981,7 @@ def generate_coil_sens(
         kspace_low_cc_sp,
         calib_width=min(24, low_y, low_z),
         device=device,
-        crop=0.8,
+        crop=espirit_crop,
         show_pbar=True,
     ).run()
     csm_low_cc_np = np.asarray(sp.to_device(csm_low_cc, sp.Device(-1))).astype(
@@ -2092,6 +2116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         reuse_coil_calib=runtime["reuse_coil_calib"],
         espirit_device=runtime["espirit_device"],
         espirit_gpu_index=runtime["espirit_gpu_index"],
+        espirit_crop=runtime["espirit_crop"],
     )
     if ncoil_ref != ncoil:
         raise ValueError(
