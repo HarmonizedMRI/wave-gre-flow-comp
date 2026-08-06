@@ -336,6 +336,81 @@ def prepare_image_array(arr: np.ndarray, part: str = "mag") -> np.ndarray:
     return np.nan_to_num(out.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def normalize_magnitude(
+    arr: np.ndarray,
+    percentile: float = 99.0,
+    scale: float | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Normalize magnitude using a computed or externally supplied scale.
+
+    When ``scale`` is omitted, it is calculated from the requested percentile
+    of the positive finite voxels. Supplying a scale allows several images,
+    such as multi-echo GRE volumes, to retain their relative intensities.
+    """
+    percentile = float(percentile)
+    if not np.isfinite(percentile) or not 0.0 < percentile <= 100.0:
+        raise ValueError(
+            "percentile must be finite and in the interval (0, 100]."
+        )
+
+    data = np.asarray(arr)
+    if data.ndim != 3:
+        raise ValueError(
+            f"Expected a 3D magnitude array, got shape {data.shape}."
+        )
+
+    mag = (
+        np.abs(data).astype(np.float32, copy=False)
+        if np.iscomplexobj(data)
+        else np.asarray(data, dtype=np.float32)
+    )
+    mag = np.nan_to_num(
+        mag,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    mag = np.maximum(mag, 0.0)
+
+    positive = mag[mag > 0.0]
+    input_percentile = (
+        float(np.percentile(positive, percentile))
+        if positive.size > 0
+        else 0.0
+    )
+
+    if scale is None:
+        if positive.size == 0:
+            raise ValueError(
+                "Magnitude image has no positive finite pixels to normalize."
+            )
+        scale = input_percentile
+        scale_source = "computed-from-this-image"
+    else:
+        scale = float(scale)
+        scale_source = "externally-supplied-shared-scale"
+
+    if not np.isfinite(scale) or scale <= np.finfo(np.float32).tiny:
+        raise ValueError(
+            f"Invalid magnitude normalization scale: {scale}."
+        )
+
+    normalized = np.ascontiguousarray(
+        (mag / scale).astype(np.float32, copy=False)
+    )
+
+    info = {
+        "Method": "positive-finite-percentile",
+        "Percentile": percentile,
+        "InputPercentileValue": input_percentile,
+        "NormalizationScale": scale,
+        "OutputPercentileValue": input_percentile / scale,
+        "ScaleSource": scale_source,
+        "Clipped": False,
+    }
+    return normalized, info
+    
+
 def clean_magnitude(
     arr: np.ndarray,
     percentile: float = 99.0,

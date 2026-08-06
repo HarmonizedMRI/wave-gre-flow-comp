@@ -2061,11 +2061,13 @@ def save_gre_echo_to_nifti(
     twix_use_fov_for_voxel_size: bool,
     metadata: Mapping[str, Any],
     voxel_size_mm: Sequence[float],
+    magnitude_normalization_scale: float,
 ) -> list[tuple[Path, Path]]:
     from utils.nifti_export_twix import (
         apply_array_axis_flips,
         crop_readout_oversampling,
         make_nifti_affine_from_twix,
+        normalize_magnitude,
         prepare_image_array,
         save_nifti_with_json,
     )
@@ -2073,12 +2075,33 @@ def save_gre_echo_to_nifti(
     img_np = image.detach().cpu().numpy() if torch.is_tensor(image) else np.asarray(image)
     if img_np.ndim != 3:
         raise ValueError(f"Expected a 3D echo image for NIfTI export, got {img_np.shape}.")
-    img_crop = crop_readout_oversampling(img_np, crop_readout_os=int(cfg["os_factor"]))
+    img_crop = crop_readout_oversampling(
+        img_np,
+        crop_readout_os=int(cfg["os_factor"]),
+    )
+
+    magnitude = prepare_image_array(img_crop, part="mag")
+    magnitude, magnitude_normalization = normalize_magnitude(
+        magnitude,
+        percentile=99.0,
+        scale=magnitude_normalization_scale,
+    )
+
+    print(
+        f"NIfTI echo {echo_idx + 1} magnitude normalization: "
+        f"input p99={magnitude_normalization['InputPercentileValue']:.6g}, "
+        f"shared scale={magnitude_normalization['NormalizationScale']:.6g}, "
+        f"output p99={magnitude_normalization['OutputPercentileValue']:.6g} "
+        "(no clipping)"
+    )
+
     outputs: list[tuple[str, np.ndarray]] = [
-        ("mag", prepare_image_array(img_crop, part="mag"))
+        ("mag", magnitude)
     ]
     if save_phase:
-        outputs.append(("phase", prepare_image_array(img_crop, part="phase")))
+        outputs.append(
+            ("phase", prepare_image_array(img_crop, part="phase"))
+        )
     flipped = apply_array_axis_flips([arr for _, arr in outputs], twix_array_axis_flips)
     outputs = [(part, arr) for (part, _), arr in zip(outputs, flipped)]
 
@@ -2095,9 +2118,12 @@ def save_gre_echo_to_nifti(
     out_folder.mkdir(parents=True, exist_ok=True)
     base = f"sub-{nifti_sub}_echo-{echo_idx + 1:02d}_acq-{mode}"
     saved: list[tuple[Path, Path]] = []
+
     for part, arr in outputs:
         nii_path = out_folder / f"{base}_part-{part}_{suffix}.nii.gz"
         json_path = out_folder / f"{base}_part-{part}_{suffix}.json"
+
+        # Create the per-file sidecar before adding part-specific metadata.
         sidecar = dict(metadata)
         sidecar.update(
             {
@@ -2105,7 +2131,9 @@ def save_gre_echo_to_nifti(
                 "SavedVoxelSizeMillimeters": list(voxel_size_affine),
                 "TwixGeometry": twix_info,
                 "TwixArrayAxisRoles": list(twix_array_axis_roles),
-                "AppliedArrayAxisFlips": [bool(v) for v in twix_array_axis_flips],
+                "AppliedArrayAxisFlips": [
+                    bool(v) for v in twix_array_axis_flips
+                ],
                 "NIfTIVoxelSizeSource": (
                     "TWIX FOV divided by saved image matrix"
                     if twix_use_fov_for_voxel_size
@@ -2113,11 +2141,32 @@ def save_gre_echo_to_nifti(
                 ),
             }
         )
+
+        if part == "phase":
+            sidecar["Units"] = "rad"
+            sidecar["ImageProcessing"] = (
+                "angle(complex_image), after readout-oversampling crop"
+            )
+        else:
+            sidecar["Units"] = "relative"
+            sidecar["MagnitudeNormalization"] = {
+                **magnitude_normalization,
+                "SharedAcrossEchoes": True,
+                "ReferenceEchoNumber": 1,
+            }
+            sidecar["ImageProcessing"] = (
+                "abs(complex_image), after readout-oversampling crop; "
+                "divided by the positive-finite 99th-percentile magnitude "
+                "of echo 1; the same scale is applied to every echo; "
+                "values are not clipped"
+            )
+
         expected_saved_spacing = (
             tuple(float(v) for v in voxel_size_affine)
             if twix_use_fov_for_voxel_size
             else tuple(float(v) for v in voxel_size_mm)
         )
+
         saved.append(
             save_nifti_with_json(
                 arr,
@@ -2128,6 +2177,7 @@ def save_gre_echo_to_nifti(
                 expected_voxel_size_mm=expected_saved_spacing,
             )
         )
+
     return saved
 
 # -----------------------------------------------------------------------------
@@ -2265,6 +2315,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         json.dump(metadata, f, indent=2)
     print(f"Saved reconstruction metadata: {metadata_path}")
 
+    # Calculate one shared magnitude-normalization scale after reconstruction.
+    # Echo 1 defines the scale, and the same scale is used for every echo so
+    # relative inter-echo signal differences are preserved.
+    shared_nifti_magnitude_scale: float | None = None
+
+    if runtime["save_nifti"]:
+        from utils.nifti_export_twix import (
+            crop_readout_oversampling,
+            normalize_magnitude,
+            prepare_image_array,
+        )
+
+        first_echo_np = images[:, :, :, 0].detach().cpu().numpy()
+        first_echo_crop = crop_readout_oversampling(
+            first_echo_np,
+            crop_readout_os=int(cfg["os_factor"]),
+        )
+        first_echo_magnitude = prepare_image_array(
+            first_echo_crop,
+            part="mag",
+        )
+
+        _, reference_normalization = normalize_magnitude(
+            first_echo_magnitude,
+            percentile=99.0,
+        )
+        shared_nifti_magnitude_scale = float(
+            reference_normalization["NormalizationScale"]
+        )
+
+        print(
+            "Shared GRE NIfTI magnitude normalization: "
+            f"echo 1 positive-voxel p99="
+            f"{shared_nifti_magnitude_scale:.6g} -> 1.0; "
+            "the same scale will be applied to all echoes."
+        )
+
     for echo_idx in range(int(cfg["Necho"])):
         echo_image = images[:, :, :, echo_idx]
         if runtime["save_echo_npy"]:
@@ -2288,6 +2375,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 psf_fit_kx_range=(runtime["psf_fit_kx_min"], runtime["psf_fit_kx_max"]),
             )
+            if shared_nifti_magnitude_scale is None:
+                raise RuntimeError(
+                    "Shared NIfTI magnitude normalization scale was not initialized."
+                )
+
             save_gre_echo_to_nifti(
                 image=echo_image,
                 twix_file=runtime["twix_file"],
@@ -2305,6 +2397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 twix_use_fov_for_voxel_size=runtime["twix_use_fov_for_voxel_size"],
                 metadata=echo_metadata,
                 voxel_size_mm=nifti_voxel_size_mm,
+                magnitude_normalization_scale=shared_nifti_magnitude_scale,
             )
     print("Reconstruction completed successfully.")
     return 0
