@@ -100,7 +100,7 @@ This checks the sequence trajectory and definitions without loading imaging data
 4. Inspect the image trajectory and resolve wave/no-wave mode.
 5. Load the integrated ACS from TWIX `refscan` SET 4.
 6. Estimate the requested coil-compression matrix on CPU.
-7. Generate low-resolution ESPIRiT maps using native 3D calibration or CPU-parallel logical-RO slice2d calibration.
+7. Generate low-resolution ESPIRiT maps on the selected CPU or GPU device.
 8. Interpolate and normalize the sensitivity maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
 10. For wave data, fit FLASH projection phase deviations, process the fitted PSF coefficients using the selected method, and construct calibrated echo-specific PSFs.
@@ -115,7 +115,7 @@ The full reconstruction is not moved to GPU.
 |---|---|
 | Coil-compression estimation | CPU / NumPy and SciPy |
 | Coil-compression application | CPU / PyTorch tensor |
-| ESPIRiT calibration | native `3d`: SigPy CPU/GPU; `slice2d`: CPU processes |
+| ESPIRiT calibration | selectable SigPy CPU or GPU |
 | Wave and no-wave CG-SENSE | CPU / PyTorch tensor |
 
 ### ESPIRiT selection
@@ -133,29 +133,6 @@ CuPy is therefore optional for CPU reconstruction. Install the `gpu` dependency 
 
 For data acquired with more than 32 physical receiver channels, consider explicitly using `--espirit-device cpu`, depending on available CPU RAM, CPU performance, and GPU memory. GPU ESPIRiT can still be appropriate on a sufficiently large GPU, but `cpu` avoids GPU-memory pressure and CUDA-specific failures.
 
-<!-- ESPIRIT-SLICE2D-RECONSTRUCTION -->
-### ESPIRiT calibration backend
-
-```text
---espirit-calib-mode 3d       native SigPy 3D calibration; default/reference
---espirit-calib-mode slice2d  CPU-parallel 2D calibration over logical-RO hybrid slices
---espirit-crop VALUE          eigenvalue support crop; default 0.8
---espirit-cpu-workers N       optional slice2d process limit; default automatic
-```
-
-The GRE ACS is first converted to coil-first logical k-space and readout oversampling is removed. In `slice2d` mode, only then is logical RO transformed to image space. Each worker receives one `(coil, LIN, PAR)` plane, so calibration remains joint across the two phase-encoding dimensions. The method does not concatenate raw data or calibrate oversampled empty readout positions.
-
-`slice2d` is CPU-only. `--espirit-device auto` and `cpu` are accepted; explicit `gpu` is rejected. Native `3d` remains the method to use for GPU calibration and the reference for method comparisons.
-
-`--espirit-crop` is passed directly to SigPy in both modes. Testing in the associated Wave-MPRAGE workflow found **0.8–0.9** to be a reasonable practical range, and the same range is recommended as the initial GRE range:
-
-- `0.8`: broader sensitivity support, including more low-SNR anatomy;
-- `0.9`: stricter support with more background suppression.
-
-Changing crop requires recalculating maps. Do not use `--reuse-coil-calib` when evaluating a new crop value.
-
-When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-core count and limits it by the number of logical-RO slices. An explicit value is useful on a shared node or when memory bandwidth limits scaling. Start conservatively, then benchmark; using every logical CPU is not necessarily fastest.
-
 ## Main reconstruction options
 
 | Option | Default | Purpose |
@@ -166,9 +143,6 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--reuse-coil-calib` | off | Reuse compatible cached coil compression and CSM files |
 | `--espirit-device {auto,cpu,gpu}` | `auto` | Select ESPIRiT execution device |
 | `--espirit-gpu-index N` | `0` | Select CUDA GPU index |
-| `--espirit-calib-mode {3d,slice2d}` | `3d` | Select native 3D or CPU-parallel slice2d ESPIRiT |
-| `--espirit-crop VALUE` | `0.8` | Set ESPIRiT eigenvalue support crop; practical initial range 0.8–0.9 |
-| `--espirit-cpu-workers N` | automatic | Limit slice2d process workers |
 | `--cg-iters N` | `50` | Maximum CG iterations |
 | `--cg-tol VALUE` | `1e-6` | Relative CG stopping tolerance |
 | `--yflip {-1,1}` | sequence-derived | Override LIN PSF sign |
@@ -242,25 +216,6 @@ Reuse cached files only when the following are unchanged:
 - relevant preprocessing assumptions.
 
 Use a distinct `--file-tag` for different scans or configurations sharing an output location.
-
-
-### Mode-specific CSM caches
-
-Native 3D preserves the established filenames:
-
-```text
-csm_acs_ncc<N><tag>.npy
-csm_full_ncc<N><tag>.npy
-```
-
-Slice2d uses:
-
-```text
-csm_acs_ncc<N>_slice2d<tag>.npy
-csm_full_ncc<N>_slice2d<tag>.npy
-```
-
-The coil-compression matrix remains shared because the ESPIRiT backend does not change coil compression. Cache filenames distinguish the calibration mode, but not every ESPIRiT parameter. Reuse maps only when crop, ACS, geometry, coil configuration, and compressed-coil count are unchanged.
 
 ## NIfTI export
 

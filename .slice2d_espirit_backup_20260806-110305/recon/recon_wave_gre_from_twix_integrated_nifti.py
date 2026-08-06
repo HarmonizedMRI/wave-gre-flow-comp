@@ -70,7 +70,6 @@ from utils.coil_compression_kspace import (
     apply_cc_coillast_torch,
     estimate_cc_matrix_coillast,
 )
-from utils.espirit_calibration import estimate_espirit_maps
 from utils.plot_coil_sens import plot_csm_magnitude_grid, plot_csm_phase_grid
 from utils.psf_wrapped_phase_fit import fit_wrapped_phase_planes, smooth_1d_nan
 from utils.twix_import import load_img, load_ref
@@ -149,35 +148,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="CUDA device index used when ESPIRiT runs on GPU.",
-    )
-    parser.add_argument(
-        "--espirit-crop",
-        type=float,
-        default=0.8,
-        help=(
-            "ESPIRiT eigenvalue crop threshold. Lower values generally retain "
-            "a larger sensitivity-map support region."
-        ),
-    )
-    parser.add_argument(
-        "--espirit-calib-mode",
-        choices=("3d", "slice2d"),
-        default="3d",
-        help=(
-            "ESPIRiT calibration backend. '3d' is native SigPy 3D calibration; "
-            "'slice2d' performs CPU-parallel 2D calibration over logical-RO "
-            "hybrid-space slices."
-        ),
-    )
-    parser.add_argument(
-        "--espirit-cpu-workers",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "CPU process workers used only by --espirit-calib-mode slice2d. "
-            "Omit to select the available physical-core count automatically."
-        ),
     )
     parser.add_argument("--cg-iters", type=int, default=50, help="Maximum CG iterations.")
     parser.add_argument("--cg-tol", type=float, default=1e-6, help="Relative CG tolerance.")
@@ -318,15 +288,6 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
     if args.cg_tol <= 0:
         raise ValueError("--cg-tol must be positive.")
 
-    if not np.isfinite(args.espirit_crop) or not 0.0 <= args.espirit_crop <= 1.0:
-        raise ValueError("--espirit-crop must be a finite value between 0 and 1.")
-    if args.espirit_cpu_workers is not None and args.espirit_cpu_workers < 1:
-        raise ValueError("--espirit-cpu-workers must be a positive integer.")
-    if args.espirit_calib_mode == "slice2d" and args.espirit_device == "gpu":
-        raise ValueError(
-            "--espirit-calib-mode slice2d is CPU-only; use --espirit-device cpu "
-            "or auto, or select --espirit-calib-mode 3d for GPU calibration."
-        )
     psf_processing = str(args.psf_coefficient_processing).strip().lower()
     fit_kx_min = args.psf_fit_kx_min
     fit_kx_max = args.psf_fit_kx_max
@@ -363,9 +324,6 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "reuse_coil_calib": bool(args.reuse_coil_calib),
         "espirit_device": args.espirit_device,
         "espirit_gpu_index": int(args.espirit_gpu_index),
-        "espirit_crop": float(args.espirit_crop),
-        "espirit_calib_mode": args.espirit_calib_mode,
-        "espirit_cpu_workers": args.espirit_cpu_workers,
         "cg_iters": int(args.cg_iters),
         "cg_tol": float(args.cg_tol),
         "yflip_override": args.yflip,
@@ -829,30 +787,14 @@ def _cache_suffix(file_tag: str) -> str:
     return f"_{file_tag}" if file_tag else ""
 
 
-def _normalize_espirit_calib_mode(mode: str) -> str:
-    mode = str(mode).strip().lower()
-    if mode not in {"3d", "slice2d"}:
-        raise ValueError("ESPIRiT calibration mode must be '3d' or 'slice2d'.")
-    return mode
-
-
-def _coil_cache_paths(
-    out_folder: Path,
-    file_tag: str,
-    ncc: int,
-    espirit_calib_mode: str,
-) -> dict[str, Path]:
+def _coil_cache_paths(out_folder: Path, file_tag: str, ncc: int) -> dict[str, Path]:
     suffix = _cache_suffix(file_tag)
-    mode = _normalize_espirit_calib_mode(espirit_calib_mode)
-    # Preserve the established native-3D filenames. Only slice2d CSM products
-    # receive a mode tag, so the shared coil-compression matrix is not duplicated.
-    csm_mode = "" if mode == "3d" else "_slice2d"
     return {
         "wcc": out_folder / f"coil_compression_matrix_ncc{ncc}{suffix}.npy",
-        "csm_low": out_folder / f"csm_acs_ncc{ncc}{csm_mode}{suffix}.npy",
-        "csm_full": out_folder / f"csm_full_ncc{ncc}{csm_mode}{suffix}.npy",
-        "csm_mag": out_folder / f"csm_full_mag_ncc{ncc}{csm_mode}{suffix}.png",
-        "csm_phase": out_folder / f"csm_full_phase_ncc{ncc}{csm_mode}{suffix}.png",
+        "csm_low": out_folder / f"csm_acs_ncc{ncc}{suffix}.npy",
+        "csm_full": out_folder / f"csm_full_ncc{ncc}{suffix}.npy",
+        "csm_mag": out_folder / f"csm_full_mag_ncc{ncc}{suffix}.png",
+        "csm_phase": out_folder / f"csm_full_phase_ncc{ncc}{suffix}.png",
     }
 
 
@@ -902,18 +844,10 @@ def load_or_generate_coil_sens(
     reuse_coil_calib: bool,
     espirit_device: str,
     espirit_gpu_index: int,
-    espirit_crop: float,
-    espirit_calib_mode: str,
-    espirit_cpu_workers: int | None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    paths = _coil_cache_paths(out_folder, file_tag, ncc, espirit_calib_mode)
+    paths = _coil_cache_paths(out_folder, file_tag, ncc)
     if reuse_coil_calib and paths["wcc"].is_file() and paths["csm_full"].is_file():
         print("Loading cached coil-compression matrix and sensitivity maps...")
-        print(
-            f"ESPIRiT calibration mode {espirit_calib_mode!r} and crop "
-            f"threshold {espirit_crop:g} are not reapplied because cached "
-            "sensitivity maps are being reused."
-        )
         wcc = np.load(paths["wcc"])
         csm_full = np.load(paths["csm_full"])
         ref = _check_integrated_refscan_shape(
@@ -936,9 +870,6 @@ def load_or_generate_coil_sens(
         ncc=ncc,
         espirit_device=espirit_device,
         espirit_gpu_index=espirit_gpu_index,
-        espirit_crop=espirit_crop,
-        espirit_calib_mode=espirit_calib_mode,
-        espirit_cpu_workers=espirit_cpu_workers,
     )
 
 
@@ -970,23 +901,8 @@ def generate_coil_sens(
     ncc: int,
     espirit_device: str,
     espirit_gpu_index: int,
-    espirit_crop: float,
-    espirit_calib_mode: str,
-    espirit_cpu_workers: int | None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    espirit_calib_mode = _normalize_espirit_calib_mode(espirit_calib_mode)
-    print(f"ESPIRiT calibration mode: {espirit_calib_mode}")
-    print(f"ESPIRiT crop threshold: {espirit_crop:g}")
-    if espirit_calib_mode == "slice2d":
-        if espirit_device == "gpu":
-            raise ValueError(
-                "slice2d ESPIRiT is CPU-only. Use --espirit-device cpu or auto, "
-                "or select the 3d calibration mode for GPU execution."
-            )
-        device, using_gpu = sp.Device(-1), False
-        print("ESPIRiT device: CPU (required by slice2d)")
-    else:
-        device, using_gpu = _select_espirit_device(espirit_device, espirit_gpu_index)
+    device, using_gpu = _select_espirit_device(espirit_device, espirit_gpu_index)
     ref = _check_integrated_refscan_shape(
         load_ref(str(twix_file)),
         ncalib1=int(cfg["Ncalib1"]),
@@ -1036,23 +952,17 @@ def generate_coil_sens(
             pass
     gc.collect()
 
-    calib_width = min(24, low_y, low_z)
-    csm_low_cc_np, espirit_info = estimate_espirit_maps(
-        kspace_low_cc_np,
-        mode=espirit_calib_mode,
+    kspace_low_cc_sp = sp.to_device(kspace_low_cc_np, device)
+    csm_low_cc = mr.app.EspiritCalib(
+        kspace_low_cc_sp,
+        calib_width=min(24, low_y, low_z),
         device=device,
-        crop=espirit_crop,
-        calib_width=calib_width,
-        thresh=0.02,
-        kernel_width=6,
-        max_iter=100,
-        cpu_workers=espirit_cpu_workers,
+        crop=0.8,
+        show_pbar=True,
+    ).run()
+    csm_low_cc_np = np.asarray(sp.to_device(csm_low_cc, sp.Device(-1))).astype(
+        np.complex64, copy=False
     )
-    if espirit_info.mode == "slice2d":
-        print(
-            "Completed slice2d ESPIRiT with "
-            f"{espirit_info.cpu_workers} CPU worker(s)."
-        )
     print(f"Low-resolution CSM: {csm_low_cc_np.shape}")
 
     zoom_factors = (
@@ -1068,7 +978,7 @@ def generate_coil_sens(
     rss = np.sqrt(np.sum(np.abs(csm_full) ** 2, axis=0, keepdims=True))
     csm_full /= np.maximum(rss, 1e-8)
 
-    paths = _coil_cache_paths(out_folder, file_tag, ncc, espirit_calib_mode)
+    paths = _coil_cache_paths(out_folder, file_tag, ncc)
     np.save(paths["wcc"], np.asarray(wcc))
     np.save(paths["csm_low"], csm_low_cc_np)
     np.save(paths["csm_full"], csm_full)
@@ -2182,9 +2092,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         reuse_coil_calib=runtime["reuse_coil_calib"],
         espirit_device=runtime["espirit_device"],
         espirit_gpu_index=runtime["espirit_gpu_index"],
-        espirit_crop=runtime["espirit_crop"],
-        espirit_calib_mode=runtime["espirit_calib_mode"],
-        espirit_cpu_workers=runtime["espirit_cpu_workers"],
     )
     if ncoil_ref != ncoil:
         raise ValueError(

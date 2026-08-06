@@ -57,36 +57,10 @@ Current device behavior:
 | Step | Device |
 |---|---|
 | Coil-compression estimation and application | CPU |
-| ESPIRiT sensitivity-map calibration | native `3d`: GPU or CPU; `slice2d`: CPU |
+| ESPIRiT sensitivity-map calibration | GPU when available, otherwise CPU |
 | Wave/no-wave CG-SENSE | CPU |
 
 A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU. For acquisitions with more than 32 physical receiver channels, consider `--espirit-device cpu` when GPU memory is limited or CPU resources are more suitable.
-
-<!-- ESPIRIT-SLICE2D-README -->
-## ESPIRiT calibration modes
-
-The reconstruction supports two sensitivity-map calibration backends:
-
-- `--espirit-calib-mode 3d` is the native SigPy 3D method and remains the default/reference. It can use `--espirit-device auto`, `cpu`, or `gpu`.
-- `--espirit-calib-mode slice2d` removes readout oversampling first, transforms logical readout to hybrid space, and runs independent 2D ESPIRiT calibrations across the joint LIN-PAR plane. It is CPU-only and is useful when native 3D CPU calibration is too slow or memory-intensive.
-
-`--espirit-crop` applies to both modes. A practical tested range is **0.8–0.9**: use `0.8` for broader low-SNR support and `0.9` for a stricter map-support mask.
-
-For `slice2d`, omit `--espirit-cpu-workers` to use Joblib's available physical-core count automatically, or set an explicit limit on shared systems. For example:
-
-```bash
-uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
-    --twix /path/to/meas_wave_gre.dat \
-    --seq /path/to/matching_wave_gre.seq \
-    --out /path/to/reconstruction \
-    --wave-mode auto \
-    --espirit-calib-mode slice2d \
-    --espirit-device cpu \
-    --espirit-crop 0.8 \
-    --espirit-cpu-workers 16
-```
-
-The native 3D and slice2d CSM files use separate cache names, while the coil-compression matrix is shared.
 
 ## Clone
 

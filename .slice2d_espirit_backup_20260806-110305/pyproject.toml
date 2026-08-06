@@ -7,7 +7,6 @@ dependencies = []
 
 [dependency-groups]
 recon = [
-    "joblib>=1.5,<2",
     "matplotlib>=3.8",
     "nibabel>=5.2",
     "numpy>=1.26,<3",

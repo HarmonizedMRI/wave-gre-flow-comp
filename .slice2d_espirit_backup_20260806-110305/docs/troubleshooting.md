@@ -103,59 +103,6 @@ With more than 32 physical receiver channels, ESPIRiT may place substantial pres
 
 CPU execution may be slower, but it avoids GPU-memory limitations and CUDA-specific failures. A large-memory GPU can still be preferable; select the device based on available CPU RAM, CPU performance, GPU memory, and expected runtime.
 
-<!-- ESPIRIT-SLICE2D-TROUBLESHOOTING -->
-### Selecting ESPIRiT calibration mode
-
-Use native 3D calibration for the reference method and for GPU execution:
-
-```text
---espirit-calib-mode 3d
---espirit-device auto
-```
-
-Use slice2d when CPU 3D calibration is impractically slow or memory-heavy:
-
-```text
---espirit-calib-mode slice2d
---espirit-device cpu
---espirit-crop 0.8
-```
-
-Slice2d is intentionally CPU-only. A command combining `slice2d` with `--espirit-device gpu` is rejected rather than silently changing the requested method.
-
-### Choosing the slice2d CPU-worker count
-
-Inspect the Linux CPU topology and process-visible CPUs:
-
-```bash
-lscpu
-nproc
-grep Cpus_allowed_list /proc/self/status
-```
-
-`lscpu` reports sockets, physical cores, threads per core, and logical CPUs. `nproc` reports the CPUs available to the current process and often reflects scheduler, container, or affinity restrictions. On Slurm also inspect `SLURM_CPUS_PER_TASK`.
-
-Omitting `--espirit-cpu-workers` enables automatic physical-core selection. On a shared system, or when the node has many CPUs, set a conservative explicit limit such as 8 or 16 and benchmark higher values. Each worker performs an SVD and consumes memory bandwidth, so 32 or 96 workers can be slower than 16 even when the CPUs appear idle. The implementation limits native BLAS threads to one per worker to avoid nested oversubscription.
-
-### Crop support is too small or too broad
-
-`--espirit-crop` remains active in both `3d` and `slice2d`. A practical initial range is 0.8–0.9:
-
-- lower toward `0.8` for broader low-SNR support;
-- higher toward `0.9` for a stricter support mask.
-
-Change one parameter at a time and inspect CSM magnitude/phase plots and the final reconstruction. When testing a new crop, rerun without `--reuse-coil-calib`; crop is applied during calibration and is not reapplied to cached maps.
-
-### Slice2d worker failure or excessive memory use
-
-Retry with fewer workers, for example:
-
-```text
---espirit-cpu-workers 8
-```
-
-Also confirm that readout oversampling was removed before calibration by using the integrated reconstruction path rather than calling the utility on raw refscan data. The utility skips only exactly-zero hybrid planes; it does not impose an SNR threshold that would intentionally remove weak anatomy.
-
 ## Input and sequence validation
 
 ### `--validate-only` still asks for `--twix` and `--out`
