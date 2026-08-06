@@ -24,6 +24,7 @@ import numpy as np
 import sigpy as sp
 import sigpy.mri as mr
 from joblib import Parallel, cpu_count, delayed, parallel_config
+from scipy.ndimage import binary_closing, binary_dilation, label
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,29 @@ def _estimate_slice2d(
     hybrid = sp.ifft(kspace, axes=(1,))
     hybrid = np.ascontiguousarray(hybrid, dtype=np.complex64)
     nro = int(hybrid.shape[1])
+    active_ro, ro_slice_rms, ro_threshold = _detect_active_ro_slices(
+        hybrid,
+        noise_fraction=0.15,
+        noise_multiplier=5.0,
+        relative_floor=1e-3,
+        padding_slices=2,
+    )
+
+    inactive_indices = np.flatnonzero(~active_ro)
+
+    print(
+        "slice2d RO support detection: "
+        f"{int(np.count_nonzero(active_ro))}/{nro} active slices, "
+        f"threshold={ro_threshold:.6g}, "
+        f"peak RMS={float(np.max(ro_slice_rms)):.6g}."
+    )
+
+    if inactive_indices.size:
+        print(
+            "Skipping low-signal logical-RO slices: "
+            + ", ".join(str(int(index)) for index in inactive_indices)
+        )
+    
     workers = _resolve_worker_count(cpu_workers, nro)
 
     print(
@@ -189,6 +213,7 @@ def _estimate_slice2d(
             delayed(_calibrate_single_ro_slice)(
                 ro_index,
                 hybrid[:, ro_index, :, :],
+                active=bool(active_ro[ro_index]),
                 crop=crop,
                 calib_width=calib_width,
                 thresh=thresh,
@@ -202,6 +227,9 @@ def _estimate_slice2d(
     # (coil, RO, LIN, PAR) without manual indexed assignment.
     maps = np.stack([result[1] for result in results], axis=1)
     maps = np.asarray(maps, dtype=np.complex64)
+
+    # Enforce exact zeros outside the detected RO support.
+    maps[:, ~active_ro, :, :] = 0
     _validate_output(maps, expected_shape=kspace.shape, label="slice2d ESPIRiT")
 
     zero_slices = tuple(result[0] for result in results if result[2])
@@ -223,6 +251,7 @@ def _calibrate_single_ro_slice(
     ro_index: int,
     kspace_slice: np.ndarray,
     *,
+    active: bool,
     crop: float,
     calib_width: int,
     thresh: float,
@@ -231,10 +260,12 @@ def _calibrate_single_ro_slice(
 ) -> tuple[int, np.ndarray, bool]:
     """Calibrate one logical-RO hybrid-space plane in a worker process."""
 
-    kspace_slice = np.ascontiguousarray(kspace_slice, dtype=np.complex64)
-    # Skip only mathematically empty planes. No SNR/support threshold is used,
-    # so weak but nonzero anatomy is not discarded by the orchestration layer.
-    if not np.any(kspace_slice):
+    kspace_slice = np.ascontiguousarray(
+        kspace_slice,
+        dtype=np.complex64,
+    )
+
+    if not active or not np.any(kspace_slice):
         return ro_index, np.zeros_like(kspace_slice), True
 
     maps = mr.app.EspiritCalib(
@@ -295,3 +326,96 @@ def _positive_int(name: str, value: int) -> int:
     if value < 1:
         raise ValueError(f"{name} must be a positive integer.")
     return value
+
+
+def _detect_active_ro_slices(
+    hybrid: np.ndarray,
+    *,
+    noise_fraction: float = 0.15,
+    noise_multiplier: float = 5.0,
+    relative_floor: float = 1e-3,
+    padding_slices: int = 2,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Detect logical-RO planes containing calibration signal.
+
+    Parameters
+    ----------
+    hybrid
+        Hybrid-space calibration data with shape (coil, RO, LIN, PAR).
+    noise_fraction
+        Fraction of lowest-energy RO planes used to estimate the noise floor.
+    noise_multiplier
+        Required slice RMS relative to the estimated noise floor.
+    relative_floor
+        Additional threshold relative to the maximum slice RMS.
+    padding_slices
+        Number of RO slices added to both sides of the detected support.
+    """
+
+    if hybrid.ndim != 4:
+        raise ValueError(
+            "Expected hybrid calibration shape (coil, RO, LIN, PAR), "
+            f"got {hybrid.shape}."
+        )
+
+    # By Parseval's theorem, summing energy over kLIN/kPAR is equivalent
+    # to summing over the corresponding image-space plane.
+    slice_rms = np.sqrt(
+        np.mean(
+            np.abs(hybrid) ** 2,
+            axis=(0, 2, 3),
+            dtype=np.float64,
+        )
+    )
+
+    nro = int(slice_rms.size)
+    if nro == 0:
+        raise ValueError("Hybrid calibration contains no RO slices.")
+
+    noise_count = max(4, int(np.ceil(noise_fraction * nro)))
+    noise_count = min(noise_count, nro)
+
+    lowest = np.partition(slice_rms, noise_count - 1)[:noise_count]
+    noise_floor = float(np.median(lowest))
+    peak = float(np.max(slice_rms))
+
+    threshold = max(
+        noise_multiplier * noise_floor,
+        relative_floor * peak,
+    )
+
+    active = slice_rms > threshold
+
+    if not np.any(active):
+        print(
+            "WARNING: automatic RO support detection found no active slices; "
+            "disabling the support guard for this calibration."
+        )
+        return np.ones(nro, dtype=bool), slice_rms, threshold
+
+    # Fill one-slice holes inside the object support.
+    active = binary_closing(
+        active,
+        structure=np.ones(3, dtype=bool),
+    )
+
+    # Retain the strongest contiguous RO component. For a head acquisition,
+    # the object should form one contiguous R-to-L support interval.
+    labels, component_count = label(active)
+
+    if component_count > 1:
+        component_scores = [
+            float(np.sum(slice_rms[labels == component]))
+            for component in range(1, component_count + 1)
+        ]
+        strongest_component = int(np.argmax(component_scores)) + 1
+        active = labels == strongest_component
+
+    if padding_slices > 0:
+        active = binary_dilation(
+            active,
+            structure=np.ones(3, dtype=bool),
+            iterations=padding_slices,
+        )
+
+    return np.asarray(active, dtype=bool), slice_rms, threshold

@@ -1066,7 +1066,7 @@ def generate_coil_sens(
         + 1j * zoom(csm_low_cc_np.imag, zoom_factors, order=1)
     ).astype(np.complex64)
     rss = np.sqrt(np.sum(np.abs(csm_full) ** 2, axis=0, keepdims=True))
-    csm_full /= np.maximum(rss, 1e-8)
+    csm_full = np.divide(csm_full, rss, out=np.zeros_like(csm_full), where=rss > 1e-6)
 
     paths = _coil_cache_paths(out_folder, file_tag, ncc, espirit_calib_mode)
     np.save(paths["wcc"], np.asarray(wcc))
