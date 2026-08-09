@@ -89,8 +89,8 @@ tag_calib = '';
 
 % ------------------------- sequence timing -------------------------
 alpha          = 15;                         % [deg]
-% TE             = [10 20] * 1e-3;       % [s]
-TE             = [20] * 1e-3;       % [s]
+TE             = [10 20] * 1e-3;       % [s]
+% TE             = [20] * 1e-3;       % [s]
 Nechoes        = numel(TE);
 TR             = 30e-3;                      % [s]
 rfSpoilingInc  = 50;                         % [deg]
@@ -154,6 +154,10 @@ isFCInitialCosine = true;
 isFCInitialPEY = true;          % Step 9 part 1: PE-y M1 FC in the initial echo prep module
 isFCInitialPARZ = true;         % Step 9 part 2a: merge z/PAR prephaser with initial cosine FC prephaser
 isFCSlabRephZ = true;           % Step 9d: FC the late half of gz_ss with a glued slab rephaser
+zeroAreaFCWaveformMode = '6point'; % choices: '6point' (default) or legacy '4point'
+if ~ismember(zeroAreaFCWaveformMode, {'4point', '6point'})
+    error('zeroAreaFCWaveformMode must be ''4point'' or ''6point''.');
+end
 
 % PE/slab prewinder timing mode before echo 1.
 %   'shortest' : use the shortest common feasible duration for gy/gz PE + slab rephaser.
@@ -680,7 +684,7 @@ end
 
 % Optional y-axis FC/prephaser modules.
 %
-% Step 3: optional inter-echo sine FC remains a zero-area four-point lobe.
+% Step 3: optional inter-echo sine FC uses the selected zero-area FC shape.
 % Step 9 revised: when PE-y FC is enabled, merge the echo-1 y sine/PE-flow
 % compensation into the PE-y prephaser itself. Then the initial y object has
 % the desired PE M0 and an M1 chosen to cancel the sine/wave contribution at
@@ -823,7 +827,8 @@ elseif isUseSeparateInitialSineFC
     [~, gyInitialFCMaxIdx] = max(abs(gyInitialFCTargetM1ByY));
     gyInitialFCTargetM1Max = gyInitialFCTargetM1ByY(gyInitialFCMaxIdx);
     [~, sineFCTimingMin] = makeZeroAreaM1FourPointFC( ...
-        waveSinChannel, gyInitialFCTargetM1Max, NaN, sys_lowPNS2);
+        waveSinChannel, gyInitialFCTargetM1Max, NaN, sys_lowPNS2, ...
+        'waveformMode', zeroAreaFCWaveformMode);
     gySineFCNaturalDur(1) = sineFCTimingMin.T;
 end
 
@@ -910,7 +915,8 @@ if isUseInterEchoYFC
             targetForNatural = gySineFCTargetM1(c);
         end
         [~, sineFCTimingMin] = makeZeroAreaM1FourPointFC( ...
-            waveSinChannel, targetForNatural, NaN, sys_lowPNS2);
+            waveSinChannel, targetForNatural, NaN, sys_lowPNS2, ...
+            'waveformMode', zeroAreaFCWaveformMode);
         gySineFCNaturalDur(c) = sineFCTimingMin.T;
     end
 end
@@ -1031,8 +1037,9 @@ for c = 1:Nechoes
     prepModuleDurTarget(c) = max([gxPrepNaturalDur(c), cosPreNaturalDur(c), gySineFCNaturalDur(c)]);
     prepModuleDurTarget(c) = ceil(prepModuleDurTarget(c) / sys.gradRasterTime) * sys.gradRasterTime;
     if ((isUseInitialYFC || isUseInitialZFC) && c == 1) || ((isUseInterEchoYFC || isUseInterEchoZFC) && c > 1) || (isUseAnyInitialXCosFC && c == 1)
-        % Four-point bipolar overlays use T = 4*r; keep the common module
-        % duration compatible with that structure, then rebuild all components.
+        % Keep the common module duration on the four-raster grid required
+        % by the nonzero-M0 helper (and by legacy four-point mode), then
+        % rebuild all components. Six-point r is optimized independently.
         prepModuleDurTarget(c) = ceil(prepModuleDurTarget(c) / (4*sys.gradRasterTime)) * (4*sys.gradRasterTime);
     end
 
@@ -1087,13 +1094,16 @@ for c = 1:Nechoes
                     end
                 elseif c == 1 && isUseSeparateInitialSineFC
                     [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gyInitialFCTargetM1Max, Ttry, sys_lowPNS2);
+                        waveSinChannel, gyInitialFCTargetM1Max, Ttry, sys_lowPNS2, ...
+                        'waveformMode', zeroAreaFCWaveformMode);
                 elseif c > 1 && isUseInterEchoPEYFC
                     [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), Ttry, sys_lowPNS2);
+                        waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), Ttry, sys_lowPNS2, ...
+                        'waveformMode', zeroAreaFCWaveformMode);
                 elseif c > 1 && isUseInterEchoSineFC
                     [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gySineFCTargetM1(c), Ttry, sys_lowPNS2);
+                        waveSinChannel, gySineFCTargetM1(c), Ttry, sys_lowPNS2, ...
+                        'waveformMode', zeroAreaFCWaveformMode);
                 end
 
                 okInitial = true;
@@ -1208,10 +1218,12 @@ for c = 1:Nechoes
 
                 if isUseInterEchoPEYFC
                     [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), Ttry, sys_lowPNS2);
+                        waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), Ttry, sys_lowPNS2, ...
+                        'waveformMode', zeroAreaFCWaveformMode);
                 elseif isUseInterEchoSineFC
                     [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gySineFCTargetM1(c), Ttry, sys_lowPNS2);
+                        waveSinChannel, gySineFCTargetM1(c), Ttry, sys_lowPNS2, ...
+                        'waveformMode', zeroAreaFCWaveformMode);
                 end
 
                 okInterEchoZ = true;
@@ -1282,7 +1294,8 @@ for c = 1:Nechoes
 
         if c == 1 && isUseSeparateInitialSineFC
             [gySineFC{c}, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                waveSinChannel, gyInitialFCTargetM1Max, prepModuleDurTarget(c), sys_lowPNS2);
+                waveSinChannel, gyInitialFCTargetM1Max, prepModuleDurTarget(c), sys_lowPNS2, ...
+                'waveformMode', zeroAreaFCWaveformMode);
             gySineFCM0(c) = sineFCTiming.M0;
             gySineFCM1(c) = sineFCTiming.M1;
             gySineFCRampTime(c) = sineFCTiming.r;
@@ -1291,7 +1304,8 @@ for c = 1:Nechoes
             gyInitialFCMaxInfo = sineFCTiming;
         elseif c > 1 && isUseInterEchoPEYFC
             [gySineFC{c}, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), prepModuleDurTarget(c), sys_lowPNS2);
+                waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), prepModuleDurTarget(c), sys_lowPNS2, ...
+                'waveformMode', zeroAreaFCWaveformMode);
             gySineFCM0(c) = sineFCTiming.M0;
             gySineFCM1(c) = sineFCTiming.M1;
             gySineFCRampTime(c) = sineFCTiming.r;
@@ -1304,7 +1318,8 @@ for c = 1:Nechoes
                     gyInterEchoFCTargetM1MaxByEcho(c), sineFCTiming, waveSinChannel, sys_lowPNS2);
         elseif c > 1 && isUseInterEchoSineFC
             [gySineFC{c}, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                waveSinChannel, gySineFCTargetM1(c), prepModuleDurTarget(c), sys_lowPNS2);
+                waveSinChannel, gySineFCTargetM1(c), prepModuleDurTarget(c), sys_lowPNS2, ...
+                'waveformMode', zeroAreaFCWaveformMode);
             gySineFCM0(c) = sineFCTiming.M0;
             gySineFCM1(c) = sineFCTiming.M1;
             gySineFCRampTime(c) = sineFCTiming.r;
@@ -1342,34 +1357,43 @@ for c = 1:Nechoes
         c, gxPrepNaturalDur(c)*1e3, cosPreNaturalDur(c)*1e3, gySineFCNaturalDur(c)*1e3, prepModuleDurTarget(c)*1e3);
 end
 if isUseSeparateInitialSineFC || isUseInterEchoSineFC || isUseInterEchoPEYFC
-    fprintf('\nY FC four-point lobe summary:\n');
+    fprintf('\nY FC zero-area %s lobe summary:\n', zeroAreaFCWaveformMode);
     if isUseSeparateInitialSineFC
         fprintf('  Separate initial echo-1 target from -0.5*sineReadM1(1): %.9g 1/m*s\n', gySineFCTargetM1(1));
         fprintf(['  Echo 1: targetM1=%.9g, achieved M1=%.9g, residual=%.3g, ', ...
-                 'M0=%.3g, common prepDur=%.6f ms, r=%.6f us, Gpeak=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
+                 'M0=%.3g, common prepDur=%.6f ms, r=%.6f us, flatTop=%.6f us, ', ...
+                 'Gpeak=%.6f kHz/m (%.1f%%), slew=%.6f T/m/s equiv (%.1f%%)\n'], ...
             gySineFCTargetM1(1), gySineFCM1(1), gySineFCM1(1)-gySineFCTargetM1(1), ...
             gySineFCM0(1), prepModuleDurTarget(1)*1e3, gySineFCRampTime(1)*1e6, ...
-            gySineFCGpeak(1)*1e-3, gySineFCSlewPeak(1)/sys.gamma);
+            max(0, prepModuleDurTarget(1)/2-2*gySineFCRampTime(1))*1e6, ...
+            gySineFCGpeak(1)*1e-3, 100*abs(gySineFCGpeak(1))/sys_lowPNS2.maxGrad, ...
+            gySineFCSlewPeak(1)/sys.gamma, 100*gySineFCSlewPeak(1)/sys_lowPNS2.maxSlew);
     end
     if isUseInterEchoPEYFC
         fprintf('  Inter-echo PE-y Step 10 active. Pure sine base target = %.9g 1/m*s\n', gySineFCTargetM1(2));
         for c = 2:Nechoes
             fprintf(['  Echo %d: total target range=[%.9g %.9g], max-|M1| iy=%d target=%.9g, ', ...
                      'achieved template M1=%.9g, M0=%.3g, prepDur=%.6f ms, r=%.6f us, ', ...
-                     'Gpeak=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
+                     'flatTop=%.6f us, Gpeak=%.6f kHz/m (%.1f%%), ', ...
+                     'slew=%.6f T/m/s equiv (%.1f%%)\n'], ...
                 c, min(gyInterEchoFCTargetM1ByY(c, :)), max(gyInterEchoFCTargetM1ByY(c, :)), ...
                 gyInterEchoFCMaxIdxByEcho(c), gyInterEchoFCTargetM1MaxByEcho(c), gySineFCM1(c), ...
                 gySineFCM0(c), prepModuleDurTarget(c)*1e3, gySineFCRampTime(c)*1e6, ...
-                gySineFCGpeak(c)*1e-3, gySineFCSlewPeak(c)/sys.gamma);
+                max(0, prepModuleDurTarget(c)/2-2*gySineFCRampTime(c))*1e6, ...
+                gySineFCGpeak(c)*1e-3, 100*abs(gySineFCGpeak(c))/sys_lowPNS2.maxGrad, ...
+                gySineFCSlewPeak(c)/sys.gamma, 100*gySineFCSlewPeak(c)/sys_lowPNS2.maxSlew);
         end
     elseif isUseInterEchoSineFC
         fprintf('  Inter-echo target from -sineReadM1(1): %.9g 1/m*s\n', -sineReadM1(1));
         for c = 2:Nechoes
             fprintf(['  Echo %d: targetM1=%.9g, achieved M1=%.9g, residual=%.3g, ', ...
-                     'M0=%.3g, common prepDur=%.6f ms, r=%.6f us, Gpeak=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
+                     'M0=%.3g, common prepDur=%.6f ms, r=%.6f us, flatTop=%.6f us, ', ...
+                     'Gpeak=%.6f kHz/m (%.1f%%), slew=%.6f T/m/s equiv (%.1f%%)\n'], ...
                 c, gySineFCTargetM1(c), gySineFCM1(c), gySineFCM1(c)-gySineFCTargetM1(c), ...
                 gySineFCM0(c), prepModuleDurTarget(c)*1e3, gySineFCRampTime(c)*1e6, ...
-                gySineFCGpeak(c)*1e-3, gySineFCSlewPeak(c)/sys.gamma);
+                max(0, prepModuleDurTarget(c)/2-2*gySineFCRampTime(c))*1e6, ...
+                gySineFCGpeak(c)*1e-3, 100*abs(gySineFCGpeak(c))/sys_lowPNS2.maxGrad, ...
+                gySineFCSlewPeak(c)/sys.gamma, 100*gySineFCSlewPeak(c)/sys_lowPNS2.maxSlew);
         end
     end
 end
@@ -2358,6 +2382,7 @@ seq.setDefinition('WaveAmplitude_mTm', gwave_max);
 seq.setDefinition('WaveSlew_Tms', swave_max);
 seq.setDefinition('WaveCycles', Ncycles);
 seq.setDefinition('UseFlowComp', double(isUseFlowComp));
+seq.setDefinition('ZeroAreaFCWaveformMode', zeroAreaFCWaveformMode);
 seq.setDefinition('UseFullInitialFC', double(isFCInitialSine && isFCInitialReadout && ...
     isFCInitialCosine && isFCInitialPEY && isFCInitialPARZ && isFCSlabRephZ));
 seq.setDefinition('UseFullInterEchoFC', double(Nechoes > 1 && ...
