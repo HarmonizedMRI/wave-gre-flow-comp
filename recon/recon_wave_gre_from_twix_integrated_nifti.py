@@ -37,6 +37,8 @@ Output
 * Optional per-echo complex NumPy files.
 * Optional cropped-readout magnitude and phase NIfTI files, one per echo, with
   JSON sidecars.
+* Optional BART CFL inputs for ESPIRiT calibration and Wave-CAIPI
+  reconstruction.
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ from utils.coil_compression_kspace import (
     apply_cc_coillast_torch,
     estimate_cc_matrix_coillast,
 )
+from utils.bart_io import export_wave_inputs
 from utils.espirit_calibration import estimate_espirit_maps
 from utils.plot_coil_sens import plot_csm_magnitude_grid, plot_csm_phase_grid
 from utils.psf_wrapped_phase_fit import fit_wrapped_phase_planes, smooth_1d_nan
@@ -201,6 +204,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Also save one complex NumPy reconstruction file per echo.",
     )
     parser.add_argument(
+        "--save-bart-inputs",
+        action="store_true",
+        help=(
+            "Export BART CFL inputs under <out>/bart_inputs[_tag]. This is "
+            "available for wave acquisitions only."
+        ),
+    )
+    parser.add_argument(
         "--save-nifti",
         action="store_true",
         help="Save one magnitude NIfTI and JSON sidecar per echo.",
@@ -317,6 +328,8 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         raise ValueError("--cg-iters must be positive.")
     if args.cg_tol <= 0:
         raise ValueError("--cg-tol must be positive.")
+    if args.validate_only and args.save_bart_inputs:
+        raise ValueError("--save-bart-inputs cannot be used with --validate-only.")
 
     if not np.isfinite(args.espirit_crop) or not 0.0 <= args.espirit_crop <= 1.0:
         raise ValueError("--espirit-crop must be a finite value between 0 and 1.")
@@ -371,6 +384,7 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "yflip_override": args.yflip,
         "zflip_override": args.zflip,
         "save_echo_npy": bool(args.save_echo_npy),
+        "save_bart_inputs": bool(args.save_bart_inputs),
         "save_nifti": bool(args.save_nifti or args.save_nifti_phase),
         "save_nifti_phase": bool(args.save_nifti_phase),
         "nifti_out_folder": nifti_out,
@@ -1087,6 +1101,47 @@ def generate_coil_sens(
             pass
     gc.collect()
     return np.asarray(wcc), csm_full, ncoil
+
+
+def _build_bart_calibration_kspace(
+    *,
+    twix_file: Path,
+    cfg: Mapping[str, Any],
+    wcc: np.ndarray,
+) -> np.ndarray:
+    """Return compressed, readout-decimated ACS on BART's full image grid."""
+
+    ref = _check_integrated_refscan_shape(
+        load_ref(str(twix_file)),
+        ncalib1=int(cfg["Ncalib1"]),
+        nacs=int(cfg["Nacs"]),
+        nsets=int(cfg["Nsets"]),
+    )
+    nacs = int(cfg["Nacs"])
+    acs_set_id = int(cfg["ACSSetID"])
+    kspace_acs = ref[:, :nacs, :nacs, acs_set_id, :]
+    kspace_acs_cc = apply_cc_coillast_torch(kspace_acs, wcc, x_chunk=8)
+    kspace_acs_cc = kspace_acs_cc[:: int(cfg["os_factor"])]
+
+    sx = int(cfg["Nx"])
+    sy = int(cfg["Ny"])
+    sz = int(cfg["Nz"])
+    nc = int(wcc.shape[1])
+    if tuple(kspace_acs_cc.shape) != (sx, nacs, nacs, nc):
+        raise ValueError(
+            "Unexpected compressed BART calibration shape: "
+            f"received {tuple(kspace_acs_cc.shape)}, expected {(sx, nacs, nacs, nc)}."
+        )
+    if nacs > sy or nacs > sz:
+        raise ValueError(
+            f"ACS size {nacs} does not fit the BART image grid {(sx, sy, sz)}."
+        )
+
+    full = torch.zeros((sx, sy, sz, nc), dtype=torch.complex64)
+    y0 = (sy - nacs) // 2
+    z0 = (sz - nacs) // 2
+    full[:, y0 : y0 + nacs, z0 : z0 + nacs, :] = kspace_acs_cc
+    return full.numpy()
 
 
 # -----------------------------------------------------------------------------
@@ -2196,6 +2251,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     image_lines, calib_lines = _split_adc_trajectory(seq, cfg)
     detected_mode = _detect_image_wave_mode(image_lines, cfg)
     mode = _resolve_reconstruction_mode(runtime["mode"], detected_mode)
+    if runtime["save_bart_inputs"] and mode != "wave":
+        raise ValueError("--save-bart-inputs requires a wave acquisition.")
     _print_sequence_summary(cfg, detected_mode=mode)
     nifti_voxel_size_mm = _derive_nifti_voxel_size_mm(cfg)
     print(
@@ -2284,6 +2341,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             psf_theory_echoes,
             "theoretical PSFs",
         )
+        if runtime["save_bart_inputs"]:
+            bart_folder = runtime["out_folder"] / (
+                "bart_inputs" + _cache_suffix(runtime["file_tag"])
+            )
+            kspace_calib = _build_bart_calibration_kspace(
+                twix_file=runtime["twix_file"],
+                cfg=cfg,
+                wcc=wcc,
+            )
+            manifest_path = export_wave_inputs(
+                bart_folder,
+                wave_kspace=kspace_cc.numpy(),
+                calibrated_psf=psf_calib_echoes.numpy(),
+                coil_sens=csm_full,
+                kspace_calib=kspace_calib,
+            )
+            print(f"Saved BART Wave-CAIPI inputs: {manifest_path}")
     images = reconstruct_echoes(
         kspace_cc=kspace_cc,
         sens=sens,

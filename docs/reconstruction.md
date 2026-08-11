@@ -177,9 +177,43 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--psf-fit-kx-min N` | none | Inclusive first oversampled-readout index for `sine-line` fitting |
 | `--psf-fit-kx-max N` | none | Exclusive final oversampled-readout index for `sine-line` fitting |
 | `--save-echo-npy` | off | Save one complex NumPy file per echo |
+| `--save-bart-inputs` | off | Export calibrated Wave-CAIPI inputs as BART CFL pairs |
 | `--validate-only` | off | Validate sequence-derived configuration without reading TWIX |
 
 Use `--help` as the authoritative complete argument reference for the checked-out code.
+
+## BART Wave-CAIPI input export
+
+Add `--save-bart-inputs` to a wave reconstruction to write BART-compatible
+`.hdr`/`.cfl` pairs under `<out>/bart_inputs`. When `--file-tag` is set, the
+folder becomes `bart_inputs_<tag>`.
+
+The export uses BART's `READ`, `PHS1`, `PHS2`, `COIL`, and `MAPS` dimension
+order:
+
+| Basename | Shape | Contents |
+|---|---|---|
+| `wave_kspace` | `(Nx_os, Ny, Nz, Ncc, 1)` | Coil-compressed acquired k-space |
+| `psf` | `(Nx_os, Ny, Nz, 1, 1)` | Calibrated wave PSF |
+| `coil_sens` | `(Nx, Ny, Nz, Ncc, 1)` | Sensitivity maps from this reconstruction |
+| `kspace_calib` | `(Nx, Ny, Nz, Ncc)` | Coil-compressed, centered integrated ACS for BART `ecalib` |
+
+Multi-echo acquisitions write matching `_echo-01`, `_echo-02`, and so on
+suffixes for `wave_kspace` and `psf`. Common sensitivity and calibration data
+are written once. `manifest.json` records every basename and shape.
+
+Run BART ESPIRiT calibration and reconstruct every exported echo with:
+
+```bash
+recon/run_bart_wave_recon.sh \
+    /path/to/reconstruction/bart_inputs \
+    /path/to/reconstruction/bart_output
+```
+
+The helper defaults to the maps produced by `bart ecalib -m 1 -c 0.8`. Pass
+`--maps-source exported` to reconstruct with `coil_sens` from the Python
+pipeline instead. Use `--help` to see iteration, tolerance, map-count, crop,
+and GPU options. Set `BART_BIN` when the BART executable is not named `bart`.
 
 ## PSF coefficient processing
 
