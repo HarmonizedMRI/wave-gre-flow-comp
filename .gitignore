@@ -8,6 +8,9 @@ generated_seq_v151/
 seq/generated_seq_v141/
 seq/generated_seq_v151/
 
+# Temp files
+*temp*
+
 # MATLAB / OS transient files
 *.asv
 .DS_Store
