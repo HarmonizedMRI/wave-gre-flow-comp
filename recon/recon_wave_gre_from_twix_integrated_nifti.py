@@ -72,7 +72,7 @@ from utils.coil_compression_kspace import (
     apply_cc_coillast_torch,
     estimate_cc_matrix_coillast,
 )
-from utils.bart_io import export_wave_inputs
+from bart.bart_utils.bart_io import export_wave_inputs
 from utils.espirit_calibration import estimate_espirit_maps
 from utils.plot_coil_sens import plot_csm_magnitude_grid, plot_csm_phase_grid
 from utils.psf_wrapped_phase_fit import fit_wrapped_phase_planes, smooth_1d_nan
@@ -2117,6 +2117,7 @@ def save_gre_echo_to_nifti(
     metadata: Mapping[str, Any],
     voxel_size_mm: Sequence[float],
     magnitude_normalization_scale: float,
+    crop_readout_os: int | None = None,
 ) -> list[tuple[Path, Path]]:
     from utils.nifti_export_twix import (
         apply_array_axis_flips,
@@ -2130,9 +2131,19 @@ def save_gre_echo_to_nifti(
     img_np = image.detach().cpu().numpy() if torch.is_tensor(image) else np.asarray(image)
     if img_np.ndim != 3:
         raise ValueError(f"Expected a 3D echo image for NIfTI export, got {img_np.shape}.")
+    crop_factor = (
+        int(cfg["os_factor"])
+        if crop_readout_os is None
+        else int(crop_readout_os)
+    )
     img_crop = crop_readout_oversampling(
         img_np,
-        crop_readout_os=int(cfg["os_factor"]),
+        crop_readout_os=crop_factor,
+    )
+    readout_processing = (
+        "after readout-oversampling crop"
+        if crop_factor > 1
+        else "without an additional readout crop"
     )
 
     magnitude = prepare_image_array(img_crop, part="mag")
@@ -2200,7 +2211,7 @@ def save_gre_echo_to_nifti(
         if part == "phase":
             sidecar["Units"] = "rad"
             sidecar["ImageProcessing"] = (
-                "angle(complex_image), after readout-oversampling crop"
+                f"angle(complex_image), {readout_processing}"
             )
         else:
             sidecar["Units"] = "relative"
@@ -2210,7 +2221,7 @@ def save_gre_echo_to_nifti(
                 "ReferenceEchoNumber": 1,
             }
             sidecar["ImageProcessing"] = (
-                "abs(complex_image), after readout-oversampling crop; "
+                f"abs(complex_image), {readout_processing}; "
                 "divided by the positive-finite 99th-percentile magnitude "
                 "of echo 1; the same scale is applied to every echo; "
                 "values are not clipped"

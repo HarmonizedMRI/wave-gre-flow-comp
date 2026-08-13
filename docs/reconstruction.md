@@ -202,18 +202,48 @@ Multi-echo acquisitions write matching `_echo-01`, `_echo-02`, and so on
 suffixes for `wave_kspace` and `psf`. Common sensitivity and calibration data
 are written once. `manifest.json` records every basename and shape.
 
-Run BART ESPIRiT calibration and reconstruct every exported echo with:
+Run BART ESPIRiT calibration, reconstruct every exported echo, and convert the
+results to NIfTI with:
 
 ```bash
-recon/run_bart_wave_recon.sh \
-    /path/to/reconstruction/bart_inputs \
-    /path/to/reconstruction/bart_output
+recon/bart/run_wave_recon.sh \
+    --bart-input /path/to/reconstruction/bart_inputs \
+    --bart-output /path/to/reconstruction/bart_output \
+    --maps-source bart \
+    --twix /path/to/meas_wave_gre.dat \
+    --seq /path/to/matching_wave_gre.seq \
+    --nifti-output /path/to/reconstruction/nifti_bart \
+    --save-phase \
+    --ecalib-options -c 0.8 --end-ecalib-options \
+    --wave-options -w -r 0.001 -f -i 100 -t 1e-6 --end-wave-options
 ```
 
-The helper defaults to the maps produced by `bart ecalib -m 1 -c 0.8`. Pass
-`--maps-source exported` to reconstruct with `coil_sens` from the Python
-pipeline instead. Use `--help` to see iteration, tolerance, map-count, crop,
-and GPU options. Set `BART_BIN` when the BART executable is not named `bart`.
+The flags between `--ecalib-options` and `--end-ecalib-options` are passed
+unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
+section is passed unchanged to `bart wave`; the example requests wavelet
+regularization and FISTA. The helper prints each complete command before
+running it.
+
+To skip `ecalib` and use the exported Python sensitivity maps, select existing
+maps explicitly:
+
+```bash
+recon/bart/run_wave_recon.sh \
+    --bart-input /path/to/reconstruction/bart_inputs \
+    --bart-output /path/to/reconstruction/bart_output \
+    --maps-source existing \
+    --existing-maps /path/to/reconstruction/bart_inputs/coil_sens \
+    --twix /path/to/meas_wave_gre.dat \
+    --seq /path/to/matching_wave_gre.seq \
+    --nifti-output /path/to/reconstruction/nifti_bart \
+    --wave-options -l -r 0.002 -b 8 -f -i 100 --end-wave-options
+```
+
+The final conversion uses TWIX geometry and Pulseq metadata. It restores the
+k-space norm removed internally by `bart wave`, applies one echo-1 magnitude
+scale to every echo, and does not crop BART's already de-oversampled readout.
+Use `--help` for every supported BART wave flag and the optional direct NIfTI
+option section. Set `BART_BIN` when the executable is not named `bart`.
 
 ## PSF coefficient processing
 

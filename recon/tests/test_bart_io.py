@@ -7,14 +7,11 @@ from pathlib import Path
 
 import numpy as np
 
-from recon.utils.bart_io import export_wave_inputs, write_cfl
+from recon.bart.bart_utils.bart_io import export_wave_inputs, read_cfl, write_cfl
 
 
 def _read_cfl(base: Path) -> np.ndarray:
-    lines = base.with_suffix(".hdr").read_text(encoding="utf-8").splitlines()
-    shape = tuple(int(value) for value in lines[1].split())
-    data = np.fromfile(base.with_suffix(".cfl"), dtype=np.complex64)
-    return data.reshape(shape, order="F")
+    return read_cfl(base, trim_trailing_singletons=False)
 
 
 class BartIoTests(unittest.TestCase):
@@ -25,7 +22,14 @@ class BartIoTests(unittest.TestCase):
         ).astype(np.complex64)
         with tempfile.TemporaryDirectory() as folder:
             base = write_cfl(Path(folder) / "array.cfl", expected)
-            np.testing.assert_array_equal(_read_cfl(base), expected)
+            np.testing.assert_array_equal(read_cfl(base), expected)
+
+    def test_read_cfl_rejects_truncated_data(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            base = write_cfl(Path(folder) / "array", np.ones((2, 3), np.complex64))
+            base.with_suffix(".cfl").write_bytes(b"\x00" * 8)
+            with self.assertRaisesRegex(ValueError, "size mismatch"):
+                read_cfl(base)
 
     def test_single_echo_exports_required_bart_dimensions(self) -> None:
         wx, sx, sy, sz, nc = 8, 4, 3, 2, 2
