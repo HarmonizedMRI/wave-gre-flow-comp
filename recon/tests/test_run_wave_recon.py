@@ -45,9 +45,9 @@ class RunWaveReconTests(unittest.TestCase):
             _touch_cfl(self.bart_input / name)
 
         self.bart_log = self.root / "bart.log"
-        self.uv_log = self.root / "uv.log"
+        self.python_log = self.root / "python.log"
         self.fake_bart = self.root / "bart"
-        self.fake_uv = self.root / "uv"
+        self.fake_python = self.root / "python"
         self.fake_bart.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
@@ -61,24 +61,24 @@ printf '\\0\\0\\0\\0\\0\\0\\0\\0' > "$output.cfl"
 """,
             encoding="utf-8",
         )
-        self.fake_uv.write_text(
+        self.fake_python.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
 {
     printf 'CALL\\n'
     printf 'ARG=%s\\n' "$@"
-} >> "$UV_TEST_LOG"
+} >> "$PYTHON_TEST_LOG"
 """,
             encoding="utf-8",
         )
         self.fake_bart.chmod(0o755)
-        self.fake_uv.chmod(0o755)
+        self.fake_python.chmod(0o755)
         self.environment = {
             **os.environ,
             "BART_BIN": str(self.fake_bart),
-            "UV_BIN": str(self.fake_uv),
+            "PYTHON_BIN": str(self.fake_python),
             "BART_TEST_LOG": str(self.bart_log),
-            "UV_TEST_LOG": str(self.uv_log),
+            "PYTHON_TEST_LOG": str(self.python_log),
         }
 
     def tearDown(self) -> None:
@@ -98,8 +98,6 @@ set -euo pipefail
             str(self.twix),
             "--seq",
             str(self.sequence),
-            "--nifti-output",
-            str(self.nifti_output),
         ]
 
     def test_forwards_original_bart_options_and_runs_conversion(self) -> None:
@@ -157,13 +155,20 @@ set -euo pipefail
                 str(self.bart_output / "image_wave"),
             ],
         )
-        uv_call = _read_calls(self.uv_log)[0]
-        self.assertEqual(uv_call[:2], ["run", "python"])
-        self.assertIn("--save-phase", uv_call)
-        self.assertEqual(uv_call[-2:], ["--nifti-suffix", "BARTGRE"])
+        python_call = _read_calls(self.python_log)[0]
+        self.assertTrue(python_call[0].endswith("wave_to_nifti.py"))
+        self.assertIn("--save-phase", python_call)
+        output_index = python_call.index("--out")
+        self.assertEqual(
+            python_call[output_index + 1], str(self.bart_output / "nifti")
+        )
+        self.assertTrue((self.bart_output / "nifti").is_dir())
+        self.assertEqual(python_call[-2:], ["--nifti-suffix", "BARTGRE"])
 
     def test_existing_maps_skip_ecalib(self) -> None:
         command = self._base_command("existing") + [
+            "--nifti-output",
+            str(self.nifti_output),
             "--existing-maps",
             str(self.bart_input / "coil_sens.hdr"),
             "--wave-options",
@@ -180,6 +185,9 @@ set -euo pipefail
         self.assertEqual(len(bart_calls), 1)
         self.assertEqual(bart_calls[0][0:7], ["wave", "-l", "-r", "0.002", "-b", "8", "-f"])
         self.assertEqual(bart_calls[0][7], str(self.bart_input / "coil_sens"))
+        python_call = _read_calls(self.python_log)[0]
+        output_index = python_call.index("--out")
+        self.assertEqual(python_call[output_index + 1], str(self.nifti_output))
 
     def test_rejects_wavelet_and_llr_together(self) -> None:
         command = self._base_command("existing") + [

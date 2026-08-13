@@ -212,7 +212,6 @@ recon/bart/run_wave_recon.sh \
     --maps-source bart \
     --twix /path/to/meas_wave_gre.dat \
     --seq /path/to/matching_wave_gre.seq \
-    --nifti-output /path/to/reconstruction/nifti_bart \
     --save-phase \
     --ecalib-options -c 0.8 --end-ecalib-options \
     --wave-options -w -r 0.001 -f -i 100 -t 1e-6 --end-wave-options
@@ -222,7 +221,10 @@ The flags between `--ecalib-options` and `--end-ecalib-options` are passed
 unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
 section is passed unchanged to `bart wave`; the example requests wavelet
 regularization and FISTA. The helper prints each complete command before
-running it.
+running it. If `--nifti-output` is omitted, converted files are written to
+`BART_OUTPUT/nifti`; pass the option only to override that location. Conversion
+uses `python` from the active Conda environment or virtual environment. Set
+`PYTHON_BIN` to select a different interpreter.
 
 To skip `ecalib` and use the exported Python sensitivity maps, select existing
 maps explicitly:
@@ -235,7 +237,7 @@ recon/bart/run_wave_recon.sh \
     --existing-maps /path/to/reconstruction/bart_inputs/coil_sens \
     --twix /path/to/meas_wave_gre.dat \
     --seq /path/to/matching_wave_gre.seq \
-    --nifti-output /path/to/reconstruction/nifti_bart \
+    --nifti-output /path/to/custom/nifti \
     --wave-options -l -r 0.002 -b 8 -f -i 100 --end-wave-options
 ```
 

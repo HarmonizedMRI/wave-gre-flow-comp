@@ -214,8 +214,10 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
 To also export the calibrated PSF, coil-compressed k-space, sensitivity maps,
 and ACS in BART CFL format, add `--save-bart-inputs`. The companion
 `recon/bart/run_wave_recon.sh` script runs BART `ecalib` and `wave` on the
-exported files. See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export)
-for dimensions and usage.
+exported files, then converts the results with `python` from the active Conda
+environment or virtual environment. NIfTIs default to `BART_OUTPUT/nifti`.
+See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
+dimensions and usage.
 
 Force a fully CPU-capable run:
 

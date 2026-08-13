@@ -13,7 +13,7 @@ Usage:
     --maps-source bart|existing \
     --twix FILE.dat \
     --seq FILE.seq \
-    --nifti-output PATH \
+    [--nifti-output PATH] \
     [--existing-maps CFL_BASENAME] \
     [--save-phase] \
     [--ecalib-options BART_OPTIONS... --end-ecalib-options] \
@@ -26,9 +26,10 @@ Required wrapper arguments:
   --maps-source SOURCE    'bart' runs ecalib; 'existing' skips ecalib.
   --twix FILE.dat         Matching Siemens TWIX file for NIfTI geometry.
   --seq FILE.seq          Matching Pulseq file for NIfTI metadata.
-  --nifti-output PATH     Directory for converted NIfTI files.
 
 Optional wrapper arguments:
+  --nifti-output PATH     Directory for converted NIfTI files. Defaults to
+                          BART_OUTPUT/nifti.
   --existing-maps BASE    Existing ESPIRiT CFL basename. Defaults to
                           BART_INPUT/coil_sens with --maps-source existing.
   --save-phase            Also write phase NIfTI files.
@@ -65,7 +66,6 @@ Example using BART ecalib and wavelet/FISTA reconstruction:
     --maps-source bart \
     --twix ./meas.dat \
     --seq ./sequence.seq \
-    --nifti-output ./nifti \
     --ecalib-options -c 0.8 --end-ecalib-options \
     --wave-options -w -r 0.001 -f -i 100 -t 1e-6 --end-wave-options
 
@@ -77,12 +77,13 @@ Example using existing maps and LLR/FISTA reconstruction:
     --existing-maps ./bart_inputs/coil_sens \
     --twix ./meas.dat \
     --seq ./sequence.seq \
-    --nifti-output ./nifti \
+    --nifti-output ./custom-nifti \
     --wave-options -l -r 0.002 -b 8 -f -i 100 --end-wave-options
 
 Environment overrides:
   BART_BIN  BART executable (default: bart)
-  UV_BIN    uv executable used for conversion (default: uv)
+  PYTHON_BIN  Python interpreter used for conversion (default: python from
+              the active Conda environment or virtual environment)
 EOF
 }
 
@@ -190,7 +191,6 @@ done
 [[ -n "$MAPS_SOURCE" ]] || fail "--maps-source is required."
 [[ -n "$TWIX_FILE" ]] || fail "--twix is required."
 [[ -n "$SEQUENCE_FILE" ]] || fail "--seq is required."
-[[ -n "$NIFTI_OUTPUT" ]] || fail "--nifti-output is required."
 [[ "$MAPS_SOURCE" == "bart" || "$MAPS_SOURCE" == "existing" ]] ||
     fail "--maps-source must be 'bart' or 'existing'."
 [[ -f "$BART_INPUT/manifest.json" ]] ||
@@ -199,11 +199,12 @@ done
 [[ -f "$SEQUENCE_FILE" ]] || fail "Pulseq file not found: $SEQUENCE_FILE"
 
 BART_EXECUTABLE="${BART_BIN:-bart}"
-UV_EXECUTABLE="${UV_BIN:-uv}"
+PYTHON_EXECUTABLE="${PYTHON_BIN:-python}"
+[[ -n "$NIFTI_OUTPUT" ]] || NIFTI_OUTPUT="$BART_OUTPUT/nifti"
 command -v "$BART_EXECUTABLE" >/dev/null 2>&1 ||
     fail "BART executable not found: $BART_EXECUTABLE"
-command -v "$UV_EXECUTABLE" >/dev/null 2>&1 ||
-    fail "uv executable not found: $UV_EXECUTABLE"
+command -v "$PYTHON_EXECUTABLE" >/dev/null 2>&1 ||
+    fail "Python interpreter not found: $PYTHON_EXECUTABLE. Activate the intended Conda environment or virtual environment first."
 
 # A second -m could conflict with the visible, required one-map setting below.
 array_contains -m "${ECALIB_OPTIONS[@]}" &&
@@ -293,7 +294,7 @@ NIFTI_CONVERTER="$SCRIPT_DIRECTORY/wave_to_nifti.py"
 [[ -f "$NIFTI_CONVERTER" ]] || fail "NIfTI converter not found: $NIFTI_CONVERTER"
 
 NIFTI_COMMAND=(
-    "$UV_EXECUTABLE" run python "$NIFTI_CONVERTER"
+    "$PYTHON_EXECUTABLE" "$NIFTI_CONVERTER"
     --bart-input-dir "$BART_INPUT"
     --bart-output-dir "$BART_OUTPUT"
     --twix "$TWIX_FILE"
