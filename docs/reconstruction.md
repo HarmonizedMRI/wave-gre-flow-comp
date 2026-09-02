@@ -174,8 +174,8 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--yflip {-1,1}` | sequence-derived | Override LIN PSF sign |
 | `--zflip {-1,1}` | sequence-derived | Override PAR PSF sign |
 | `--psf-coefficient-processing {smooth,sine-line}` | `smooth` | Select PSF coefficient post-processing for wave data |
-| `--psf-fit-kx-min N` | none | Inclusive first oversampled-readout index for `sine-line` fitting |
-| `--psf-fit-kx-max N` | none | Exclusive final oversampled-readout index for `sine-line` fitting |
+| `--psf-fit-kx-min N` | none | Inclusive manual `sine-line` bound; omit both bounds for automatic selection |
+| `--psf-fit-kx-max N` | none | Exclusive manual `sine-line` bound; omit both bounds for automatic selection |
 | `--save-echo-npy` | off | Save one complex NumPy file per echo |
 | `--save-bart-inputs` | off | Export calibrated Wave-CAIPI inputs as BART CFL pairs |
 | `--validate-only` | off | Validate sequence-derived configuration without reading TWIX |
@@ -200,7 +200,9 @@ order:
 
 Multi-echo acquisitions write matching `_echo-01`, `_echo-02`, and so on
 suffixes for `wave_kspace` and `psf`. Common sensitivity and calibration data
-are written once. `manifest.json` records every basename and shape.
+are written once. `manifest.json` records every basename and shape plus the
+shared PSF coefficient-processing request, selected range, algorithm/version,
+fit diagnostics, validation result, and multi-echo calibration scope.
 
 Run BART ESPIRiT calibration, reconstruct every exported echo, and convert the
 results to NIfTI with:
@@ -259,7 +261,32 @@ Wave calibration first estimates the readout-dependent phase-plane coefficients 
 
 This preserves the normal reconstruction path: each raw coefficient curve is processed with the existing NaN-aware moving-average smoothing. No kx bounds are required.
 
-### `sine-line` — optional fallback for an unstable fit
+### `sine-line` — optional automatic fit
+
+If the default smooth-coefficient diagnostic looks unreliable, first omit
+both bounds to request automatic selection:
+
+```bash
+uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
+    --twix /path/to/scan.dat \
+    --seq /path/to/scan.seq \
+    --out /path/to/recon \
+    --wave-mode auto \
+    --psf-coefficient-processing sine-line
+```
+
+Automatic selection uses the common finite `a/b/c` support and sin/cos
+projection quality, excludes unreliable edges and transient/high-variance
+coefficient regions, requires a reliable central core, and selects one shared
+contiguous half-open interval. Reliable samples inside that interval are
+smoothed with the same nine-sample NaN-aware window before fitting. The fit
+must pass convergence, residual, conditioning, frequency, and endpoint-trim
+extrapolation-stability gates. Failure stops processing; it never silently
+falls back to `smooth`.
+
+### Manual `sine-line` override
+
+If the automatic result is also unsatisfactory, provide a reviewed interval:
 
 ```bash
 uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
@@ -272,17 +299,31 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --psf-fit-kx-max 512
 ```
 
-Use this option when the normally fitted coefficient curves become unstable or blow up outside a region that is known to have reliable calibration signal. The user must identify a high-fidelity oversampled-readout interval and provide both bounds. The interval follows the half-open convention:
+The interval follows the half-open convention:
 
 ```text
 [kx_min, kx_max)
 ```
 
-The sine-plus-line model is fitted independently to `a(kx)`, `b(kx)`, and `c(kx)` inside that interval, then evaluated over the full oversampled readout. In this mode, the fitted model **replaces** smoothing; it is not smoothed again. The same calibrated phase-deviation correction is combined with the echo-specific theoretical PSF for every echo.
+The manual sine-plus-line model is fitted independently to raw `a(kx)`,
+`b(kx)`, and `c(kx)` inside that interval, then evaluated over the full
+oversampled readout. It replaces smoothing and is not smoothed again.
 
-Before using `sine-line`, first rule out a mismatched `.seq` file, incorrect PSF signs, incomplete FOV coverage, and neck/shoulder signal contamination. Inspect the raw coefficient plots and choose bounds that contain only the stable, high-fidelity portion. The code does not determine this interval automatically.
+Before using `sine-line`, first rule out a mismatched `.seq` file, incorrect
+PSF signs, incomplete FOV coverage, and neck/shoulder signal contamination.
+Inspect `psf_integrated_calib_fit*.png`; its shaded interval and legend identify
+the automatic or manual fit selection. Automatic diagnostics are also written
+to `psf_sine_line_fit*.json`.
 
-Selecting `sine-line` without both bounds is an error. Passing kx bounds while using `smooth` is also rejected so that options are not silently ignored.
+Supplying only one bound is an error. Passing bounds while using `smooth` is
+also rejected so options are not silently ignored.
+
+The integrated refscan produces one `a/b/c` coefficient fit, shared across all
+echoes. It is combined separately with each echo's sequence-derived
+theoretical trajectory, which may differ because of flow compensation. The
+code never refits `a/b/c` from later echo images, so reconstruction PSF
+calibration does not absorb inter-echo object phase evolution used for
+delta-B0 analysis.
 
 ## Coil-calibration cache
 

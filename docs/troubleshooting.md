@@ -261,7 +261,17 @@ The default processing is:
 
 First verify the matching `.seq` file, sequence-derived PSF signs, calibration SET layout, and raw PSF diagnostic plots. Also check acquisition setup: neck or shoulder signal contamination and anatomy outside the prescribed FOV can corrupt part of the projection calibration.
 
-When `a(kx)`, `b(kx)`, or `c(kx)` is reliable only over a known high-fidelity readout interval, use the optional sine-plus-line substitution:
+If the smooth coefficient diagnostic looks unreliable, first request
+automatic sine-line selection without bounds:
+
+```bash
+--psf-coefficient-processing sine-line
+```
+
+Inspect `psf_integrated_calib_fit*.png` and the corresponding
+`psf_sine_line_fit*.json`. Automatic failure is intentional and does not fall
+back to smooth. If the automatic curve is also unsatisfactory and a reliable
+interval is known, supply both manual bounds:
 
 ```bash
 --psf-coefficient-processing sine-line \
@@ -269,7 +279,11 @@ When `a(kx)`, `b(kx)`, or `c(kx)` is reliable only over a known high-fidelity re
 --psf-fit-kx-max 512
 ```
 
-The range is half-open, `[kx_min, kx_max)`, and refers to oversampled-readout indices. Choose the bounds from the stable part of the raw coefficient curves. The model is fitted inside that interval and extrapolated across the complete readout. It replaces smoothing and is not followed by another smoothing step. Both bounds are required.
+The range is half-open, `[kx_min, kx_max)`, and refers to oversampled-readout
+indices. Choose the bounds from the stable part of the raw coefficient curves.
+The manual model is fitted to the raw values inside that interval and
+extrapolated across the complete readout. It replaces smoothing and is not
+followed by another smoothing step. Supply either both bounds or neither.
 
 Do not use `sine-line` merely to hide a mismatched sequence, incorrect ordering, or poor acquisition coverage.
 

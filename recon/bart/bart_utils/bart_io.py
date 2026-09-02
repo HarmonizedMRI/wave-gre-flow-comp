@@ -87,8 +87,23 @@ def export_wave_inputs(
     calibrated_psf: np.ndarray,
     coil_sens: np.ndarray,
     kspace_calib: np.ndarray,
+    psf_calibration: dict[str, Any] | None = None,
 ) -> Path:
-    """Export reconstruction-native arrays for BART ``ecalib`` and ``wave``."""
+    """Export reconstruction-native arrays for BART ``ecalib`` and ``wave``.
+
+    Args:
+        out_folder: Destination directory for CFL pairs and their manifest.
+        wave_kspace: Multi-echo Wave k-space in ``(RO, LIN, PAR, echo, coil)``.
+        calibrated_psf: Per-echo calibrated PSFs in
+            ``(echo, RO, LIN, PAR)``.
+        coil_sens: Coil-first sensitivity maps.
+        kspace_calib: Coil-last ACS calibration k-space.
+        psf_calibration: Optional JSON-compatible shared coefficient-fit
+            provenance.
+
+    Returns:
+        Path to the written JSON manifest.
+    """
 
     destination = Path(out_folder)
     destination.mkdir(parents=True, exist_ok=True)
@@ -141,6 +156,8 @@ def export_wave_inputs(
         "kspace_calib_shape": list(calib.shape),
         "echoes": files,
     }
+    if psf_calibration is not None:
+        manifest["psf_calibration"] = psf_calibration
     manifest_path = destination / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path

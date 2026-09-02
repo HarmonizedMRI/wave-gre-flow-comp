@@ -135,6 +135,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     seq = native._load_sequence(seq_file)
     cfg = native._derive_gre_config(seq, yflip_override=None, zflip_override=None)
+    input_manifest = json.loads(
+        (input_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    psf_processing_diagnostics = input_manifest.get("psf_calibration")
+    if psf_processing_diagnostics is not None and not isinstance(
+        psf_processing_diagnostics, dict
+    ):
+        raise ValueError("BART manifest psf_calibration must be a mapping.")
     echo_files = discover_bart_echoes(input_dir, output_dir)
     if len(echo_files) != int(cfg["Necho"]):
         raise ValueError(
@@ -196,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             echo_idx=echo_idx,
             voxel_size_mm=voxel_size_mm,
             geometry_diagnostics=geometry_diagnostics,
+            psf_processing_diagnostics=psf_processing_diagnostics,
         )
         metadata.update(
             {

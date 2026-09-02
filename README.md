@@ -232,7 +232,7 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
 
 Use `--espirit-device gpu --espirit-gpu-index 0` to require a specific GPU. Explicit GPU mode raises an error instead of silently falling back when the requested GPU is unavailable.
 
-See [Reconstruction](docs/reconstruction.md) for supported acquisition assumptions, the pipeline, complete argument guidance, cache reuse, outputs, and NIfTI conventions. If the default PSF coefficient fit becomes unstable outside a trusted readout region, the optional `sine-line` processing mode can extrapolate from a user-specified high-fidelity kx interval; see [Reconstruction](docs/reconstruction.md#psf-coefficient-processing) and [Troubleshooting](docs/troubleshooting.md#psf-coefficient-fit-becomes-unstable-or-blows-up).
+See [Reconstruction](docs/reconstruction.md) for supported acquisition assumptions, the pipeline, complete argument guidance, cache reuse, outputs, and NIfTI conventions. PSF coefficients use smoothing by default. If their diagnostic looks unreliable, `sine-line` can first select a fit interval automatically; both kx bounds remain available as a reproducible manual override. See [Reconstruction](docs/reconstruction.md#psf-coefficient-processing) and [Troubleshooting](docs/troubleshooting.md#psf-coefficient-fit-becomes-unstable-or-blows-up).
 
 ## Documentation
 
