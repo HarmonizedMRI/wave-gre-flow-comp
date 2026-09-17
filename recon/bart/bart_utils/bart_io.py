@@ -88,6 +88,7 @@ def export_wave_inputs(
     coil_sens: np.ndarray,
     kspace_calib: np.ndarray,
     psf_calibration: dict[str, Any] | None = None,
+    coil_calibration: dict[str, Any] | None = None,
 ) -> Path:
     """Export reconstruction-native arrays for BART ``ecalib`` and ``wave``.
 
@@ -100,6 +101,8 @@ def export_wave_inputs(
         kspace_calib: Coil-last ACS calibration k-space.
         psf_calibration: Optional JSON-compatible shared coefficient-fit
             provenance.
+        coil_calibration: Optional JSON-compatible ACS and sensitivity-map
+            calibration provenance.
 
     Returns:
         Path to the written JSON manifest.
@@ -158,6 +161,8 @@ def export_wave_inputs(
     }
     if psf_calibration is not None:
         manifest["psf_calibration"] = psf_calibration
+    if coil_calibration is not None:
+        manifest["coil_calibration"] = coil_calibration
     manifest_path = destination / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path

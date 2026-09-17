@@ -311,11 +311,22 @@ When coil compression and ESPIRiT completed successfully but a later PSF, CG-SEN
 --reuse-coil-calib
 ```
 
-The correct option name is `--reuse-coil-calib`—not `--reuse-exist-calib`. Use the same output folder, `--file-tag`, `--ncc`, receiver-coil configuration, integrated ACS, matrix, FOV, and sequence geometry. The script checks cache dimensions, but the filename cannot encode every acquisition property.
+The correct option name is `--reuse-coil-calib`—not `--reuse-exist-calib`.
+Corrected caches contain `roimgcrop-v1` in their filenames and include a JSON
+manifest. Reuse validates the source TWIX identity, logical ACS hash, geometry,
+readout-crop algorithm, ESPIRiT settings, array dimensions, finite values, and
+artifact hashes.
+
+Historical caches without `roimgcrop-v1` were produced by direct readout
+k-space striding. They are intentionally ignored because outside-FOV anatomy
+may have aliased into their coil calibration. Generate a corrected cache rather
+than renaming or attesting those files.
 
 ### Cached calibration shape error
 
-Delete or stop reusing the cache when acquisition geometry or coil configuration changes. The cache filename includes `ncc` and the optional file tag, but it cannot encode every acquisition property.
+Use a new output folder or file tag when acquisition geometry, coil
+configuration, ACS, or ESPIRiT settings change. An incomplete corrected cache
+is rejected rather than partially overwritten.
 
 Use a new tag:
 

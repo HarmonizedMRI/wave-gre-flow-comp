@@ -36,6 +36,134 @@ def _quality(length: int) -> dict[str, dict[str, np.ndarray]]:
 
 
 class GrePsfCalibrationTests(unittest.TestCase):
+    @staticmethod
+    def _coil_cfg() -> dict[str, object]:
+        """Return a compact GRE coil-calibration configuration fixture.
+
+        Returns:
+            Configuration with 4x readout oversampling and set-4 ACS.
+        """
+
+        return {
+            "Nx": 4,
+            "Nx_os": 16,
+            "Ny": 6,
+            "Nz": 6,
+            "os_factor": 4,
+            "Ncalib1": 2,
+            "Nacs": 2,
+            "Nsets": 5,
+            "ACSSetID": 4,
+        }
+
+    @staticmethod
+    def _centered_fft(array: np.ndarray) -> np.ndarray:
+        """Return a centered orthonormal readout FFT.
+
+        Args:
+            array: Complex image with readout first.
+
+        Returns:
+            Centered readout k-space.
+        """
+
+        return np.fft.fftshift(
+            np.fft.fft(
+                np.fft.ifftshift(array, axes=(0,)),
+                axis=0,
+                norm="ortho",
+            ),
+            axes=(0,),
+        )
+
+    def _refscan_with_outside_fov_signal(self) -> tuple[torch.Tensor, np.ndarray]:
+        """Build one mock refscan with removable outside-FOV anatomy.
+
+        Returns:
+            Refscan tensor and expected logical ACS k-space.
+        """
+
+        logical_image = np.zeros((4, 2, 2, 2), dtype=np.complex64)
+        logical_image[1:3] = 1.0 + 0.25j
+        oversampled_image = np.zeros((16, 2, 2, 2), dtype=np.complex64)
+        oversampled_image[6:10] = logical_image
+        oversampled_image[1:3] = 25.0
+        raw = self._centered_fft(oversampled_image).astype(np.complex64)
+        ref = torch.zeros((16, 2, 2, 5, 2), dtype=torch.complex64)
+        ref[:, :, :, 4, :] = torch.from_numpy(raw)
+        expected = self._centered_fft(logical_image).astype(np.complex64)
+        return ref, expected
+
+    def test_logical_integrated_acs_crops_in_image_domain(self) -> None:
+        """GRE set-4 ACS must remove outside-FOV signal without wrapping it."""
+
+        ref, expected = self._refscan_with_outside_fov_signal()
+
+        actual = native._logical_integrated_acs(ref, self._coil_cfg())
+
+        self.assertEqual(tuple(actual.shape), (4, 2, 2, 2))
+        np.testing.assert_allclose(actual.numpy(), expected, rtol=2e-6, atol=2e-6)
+
+    def test_bart_calibration_uses_alias_free_logical_acs(self) -> None:
+        """The BART exporter must embed corrected ACS without RO striding."""
+
+        ref, expected = self._refscan_with_outside_fov_signal()
+        with patch.object(native, "load_ref", return_value=ref):
+            actual = native._build_bart_calibration_kspace(
+                twix_file=Path("input.dat"),
+                cfg=self._coil_cfg(),
+                wcc=np.eye(2, dtype=np.complex64),
+            )
+
+        self.assertEqual(actual.shape, (4, 6, 6, 2))
+        np.testing.assert_allclose(actual[:, 2:4, 2:4, :], expected, rtol=2e-6, atol=2e-6)
+        outside = actual.copy()
+        outside[:, 2:4, 2:4, :] = 0
+        self.assertEqual(np.count_nonzero(outside), 0)
+
+    def test_coil_cache_is_versioned_and_hash_bound(self) -> None:
+        """Corrected caches should reject changed sources or artifacts."""
+
+        ref, _ = self._refscan_with_outside_fov_signal()
+        logical = native._logical_integrated_acs(ref, self._coil_cfg())
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            twix = root / "input.dat"
+            twix.write_bytes(b"mock twix")
+            paths = native._coil_cache_paths(root, "", 2, "3d")
+            self.assertIn("roimgcrop-v1", paths["wcc"].name)
+            np.save(paths["wcc"], np.eye(2, dtype=np.complex64))
+            np.save(paths["csm_full"], np.ones((2, 4, 6, 6), dtype=np.complex64))
+            contract = native._coil_calibration_contract(
+                twix_file=twix,
+                cfg=self._coil_cfg(),
+                logical_acs=logical,
+                ncc=2,
+                espirit_calib_mode="3d",
+                espirit_crop=0.8,
+            )
+            native._write_coil_cache_manifest(
+                paths["manifest"],
+                contract=contract,
+                wcc_path=paths["wcc"],
+                csm_full_path=paths["csm_full"],
+            )
+            native._validate_coil_cache_manifest(
+                paths["manifest"],
+                expected_contract=contract,
+                wcc_path=paths["wcc"],
+                csm_full_path=paths["csm_full"],
+            )
+
+            np.save(paths["wcc"], np.zeros((2, 2), dtype=np.complex64))
+            with self.assertRaisesRegex(ValueError, "hashes"):
+                native._validate_coil_cache_manifest(
+                    paths["manifest"],
+                    expected_contract=contract,
+                    wcc_path=paths["wcc"],
+                    csm_full_path=paths["csm_full"],
+                )
+
     def test_cli_accepts_automatic_or_complete_manual_bounds(self) -> None:
         """Sine-line should use automatic selection when both bounds are absent."""
 

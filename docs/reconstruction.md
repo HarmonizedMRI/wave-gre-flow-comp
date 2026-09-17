@@ -98,8 +98,11 @@ This checks the sequence trajectory and definitions without loading imaging data
 2. Validate matrix dimensions, oversampling, FOV, echoes, averages, acceleration, calibration layout, orientation, wave channels, and k-space ordering.
 3. Split the sequence ADC trajectory into image and appended calibration lines.
 4. Inspect the image trajectory and resolve wave/no-wave mode.
-5. Load the integrated ACS from TWIX `refscan` SET 4.
-6. Estimate the requested coil-compression matrix on CPU.
+5. Load the integrated ACS from TWIX `refscan` SET 4 and remove readout
+   oversampling with a centered readout IFFT, central nominal-FOV image crop,
+   and centered FFT.
+6. Estimate the requested coil-compression matrix from that alias-free logical
+   ACS on CPU.
 7. Generate low-resolution ESPIRiT maps using native 3D calibration or CPU-parallel logical-RO slice2d calibration.
 8. Interpolate and normalize the sensitivity maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
@@ -143,7 +146,13 @@ For data acquired with more than 32 physical receiver channels, consider explici
 --espirit-cpu-workers N       optional slice2d process limit; default automatic
 ```
 
-The GRE ACS is first converted to coil-first logical k-space and readout oversampling is removed. In `slice2d` mode, only then is logical RO transformed to image space. Each worker receives one `(coil, LIN, PAR)` plane, so calibration remains joint across the two phase-encoding dimensions. The method does not concatenate raw data or calibrate oversampled empty readout positions.
+The GRE ACS is converted to logical k-space with centered image-domain cropping
+before coil compression or either ESPIRiT backend. Direct readout k-space
+striding is not equivalent: it aliases signal outside the nominal readout FOV
+into the calibration image and is therefore forbidden. In `slice2d` mode, only
+after this correction is logical RO transformed to image space. Each worker
+receives one `(coil, LIN, PAR)` plane, so calibration remains joint across the
+two phase-encoding dimensions.
 
 `slice2d` is CPU-only. `--espirit-device auto` and `cpu` are accepted; explicit `gpu` is rejected. Native `3d` remains the method to use for GPU calibration and the reference for method comparisons.
 
@@ -330,14 +339,19 @@ delta-B0 analysis.
 The output folder can contain files such as:
 
 ```text
-coil_compression_matrix_ncc<N><tag>.npy
-csm_acs_ncc<N><tag>.npy
-csm_full_ncc<N><tag>.npy
-csm_full_mag_ncc<N><tag>.png
-csm_full_phase_ncc<N><tag>.png
+coil_compression_matrix_ncc<N>_roimgcrop-v1<tag>.npy
+csm_acs_ncc<N>_roimgcrop-v1<tag>.npy
+csm_full_ncc<N>_roimgcrop-v1<tag>.npy
+csm_full_mag_ncc<N>_roimgcrop-v1<tag>.png
+csm_full_phase_ncc<N>_roimgcrop-v1<tag>.png
+coil_calibration_ncc<N>_roimgcrop-v1<tag>.json
 ```
 
-`--reuse-coil-calib` reuses the coil-compression matrix and full-resolution CSM only when both required cache files are present. The script validates their dimensions before use. This is useful when ESPIRiT and coil-compression files were generated successfully but a later PSF, CG-SENSE, or output step failed. Rerun with the same output folder, `--file-tag`, `--ncc`, coil configuration, ACS, and geometry.
+`--reuse-coil-calib` requires the matrix, full-resolution CSM, and versioned
+manifest. Reuse recomputes the logical ACS identity and validates the source,
+geometry, centered-crop algorithm, ACS hash, ESPIRiT settings, dimensions,
+finite values, and artifact hashes. Historical stride-derived cache filenames
+are ignored and cannot be reused as corrected calibration.
 
 Reuse cached files only when the following are unchanged:
 
@@ -353,21 +367,23 @@ Use a distinct `--file-tag` for different scans or configurations sharing an out
 
 ### Mode-specific CSM caches
 
-Native 3D preserves the established filenames:
+Native 3D uses:
 
 ```text
-csm_acs_ncc<N><tag>.npy
-csm_full_ncc<N><tag>.npy
+csm_acs_ncc<N>_roimgcrop-v1<tag>.npy
+csm_full_ncc<N>_roimgcrop-v1<tag>.npy
 ```
 
 Slice2d uses:
 
 ```text
-csm_acs_ncc<N>_slice2d<tag>.npy
-csm_full_ncc<N>_slice2d<tag>.npy
+csm_acs_ncc<N>_slice2d_roimgcrop-v1<tag>.npy
+csm_full_ncc<N>_slice2d_roimgcrop-v1<tag>.npy
 ```
 
-The coil-compression matrix remains shared because the ESPIRiT backend does not change coil compression. Cache filenames distinguish the calibration mode, but not every ESPIRiT parameter. Reuse maps only when crop, ACS, geometry, coil configuration, and compressed-coil count are unchanged.
+The coil-compression matrix remains shared because the ESPIRiT backend does
+not change coil compression. The mode-specific manifest binds parameters that
+are not encoded in the filename, including the ESPIRiT crop threshold.
 
 ## NIfTI export
 

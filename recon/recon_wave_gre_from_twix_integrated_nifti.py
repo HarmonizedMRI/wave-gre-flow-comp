@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -69,6 +70,7 @@ from utils.coil_compression_kspace import (
     apply_cc_coilfirst_np,
     apply_cc_coillast_torch,
     estimate_cc_matrix_coillast,
+    remove_readout_oversampling_kspace,
 )
 from bart.bart_utils.bart_io import export_wave_inputs
 from utils.espirit_calibration import estimate_espirit_maps
@@ -100,6 +102,15 @@ plt.rcParams.update(
         "figure.titlesize": 18,
     }
 )
+
+
+COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL = {
+    "method": "centered-image-domain-crop",
+    "version": 1,
+    "fft_normalization": "ortho",
+}
+COIL_CALIBRATION_CACHE_FORMAT_VERSION = 1
+COIL_CALIBRATION_CACHE_TAG = "roimgcrop-v1"
 
 
 # -----------------------------------------------------------------------------
@@ -851,6 +862,170 @@ def _check_integrated_refscan_shape(
 # -----------------------------------------------------------------------------
 
 
+def _logical_integrated_acs(
+    ref: torch.Tensor, cfg: Mapping[str, Any]
+) -> torch.Tensor:
+    """Extract set-4 ACS and remove readout oversampling without aliasing.
+
+    Args:
+        ref: Validated integrated refscan in
+            ``(RO_os, LIN, PAR, SET, physical_coil)`` order.
+        cfg: Validated GRE sequence configuration.
+
+    Returns:
+        Complex64 ACS on the logical readout grid in coil-last order.
+
+    Raises:
+        ValueError: If the ACS geometry or finite-value contract is violated.
+    """
+
+    nacs = int(cfg["Nacs"])
+    acs_set_id = int(cfg["ACSSetID"])
+    oversampled = ref[:, :nacs, :nacs, acs_set_id, :]
+    logical = remove_readout_oversampling_kspace(
+        oversampled,
+        int(cfg["os_factor"]),
+        axis=0,
+    )
+    expected = (int(cfg["Nx"]), nacs, nacs, int(ref.shape[-1]))
+    if tuple(logical.shape) != expected:
+        raise ValueError(
+            "Unexpected logical integrated ACS shape after readout crop: "
+            f"received {tuple(logical.shape)}, expected {expected}."
+        )
+    if not torch.isfinite(logical).all():
+        raise ValueError("Logical integrated ACS contains non-finite values.")
+    return logical.contiguous()
+
+
+def _load_logical_integrated_acs(
+    twix_file: Path, cfg: Mapping[str, Any]
+) -> torch.Tensor:
+    """Load and validate the alias-free logical set-4 ACS.
+
+    Args:
+        twix_file: Integrated Wave-GRE TWIX file.
+        cfg: Validated GRE sequence configuration.
+
+    Returns:
+        Complex64 logical-readout ACS in coil-last order.
+    """
+
+    ref = _check_integrated_refscan_shape(
+        load_ref(str(twix_file)),
+        ncalib1=int(cfg["Ncalib1"]),
+        nacs=int(cfg["Nacs"]),
+        nsets=int(cfg["Nsets"]),
+    )
+    return _logical_integrated_acs(ref, cfg)
+
+
+def _array_sha256(array: np.ndarray | torch.Tensor) -> str:
+    """Return a shape- and dtype-bound SHA-256 digest for one array.
+
+    Args:
+        array: NumPy array or CPU/GPU PyTorch tensor.
+
+    Returns:
+        Hexadecimal SHA-256 digest of metadata followed by C-order payload.
+    """
+
+    if torch.is_tensor(array):
+        values = array.detach().cpu().contiguous().numpy()
+    else:
+        values = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(values.dtype).encode("ascii"))
+    digest.update(json.dumps(list(values.shape)).encode("ascii"))
+    digest.update(memoryview(values).cast("B"))
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    """Return the SHA-256 digest of a file.
+
+    Args:
+        path: Existing regular file.
+
+    Returns:
+        Hexadecimal SHA-256 digest.
+    """
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _coil_calibration_contract(
+    *,
+    twix_file: Path,
+    cfg: Mapping[str, Any],
+    logical_acs: torch.Tensor,
+    ncc: int,
+    espirit_calib_mode: str,
+    espirit_crop: float,
+) -> dict[str, Any]:
+    """Build the immutable scientific contract for cached coil calibration.
+
+    Args:
+        twix_file: Integrated Wave-GRE TWIX source.
+        cfg: Validated GRE sequence configuration.
+        logical_acs: Alias-free logical set-4 ACS.
+        ncc: Requested number of virtual coils.
+        espirit_calib_mode: Selected ESPIRiT backend.
+        espirit_crop: ESPIRiT eigenvalue crop threshold.
+
+    Returns:
+        JSON-compatible cache provenance contract.
+    """
+
+    source = twix_file.stat()
+    return {
+        "format_version": COIL_CALIBRATION_CACHE_FORMAT_VERSION,
+        "status": "alias_free_gre_coil_calibration_ready",
+        "source_twix": {
+            "path": str(twix_file.resolve()),
+            "size_bytes": int(source.st_size),
+            "mtime_ns": int(source.st_mtime_ns),
+        },
+        "geometry": {
+            "logical_matrix_ro_lin_par": [
+                int(cfg["Nx"]),
+                int(cfg["Ny"]),
+                int(cfg["Nz"]),
+            ],
+            "readout_oversampling_factor": int(cfg["os_factor"]),
+            "integrated_acs_size": int(cfg["Nacs"]),
+            "integrated_acs_set_id": int(cfg["ACSSetID"]),
+        },
+        "readout_oversampling_removal": {
+            **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
+            "input_readout": int(cfg["Nx_os"]),
+            "output_readout": int(cfg["Nx"]),
+            "oversampling_factor": int(cfg["os_factor"]),
+        },
+        "logical_acs": {
+            "shape": list(logical_acs.shape),
+            "sha256": _array_sha256(logical_acs),
+        },
+        "coil_compression": {
+            "physical_coils": int(logical_acs.shape[-1]),
+            "virtual_coils": int(ncc),
+            "readout_stride": 1,
+        },
+        "espirit": {
+            "mode": _normalize_espirit_calib_mode(espirit_calib_mode),
+            "crop": float(espirit_crop),
+            "calib_width_maximum": 24,
+            "threshold": 0.02,
+            "kernel_width": 6,
+            "maximum_iterations": 100,
+        },
+    }
+
+
 def _cache_suffix(file_tag: str) -> str:
     return f"_{file_tag}" if file_tag else ""
 
@@ -870,16 +1045,103 @@ def _coil_cache_paths(
 ) -> dict[str, Path]:
     suffix = _cache_suffix(file_tag)
     mode = _normalize_espirit_calib_mode(espirit_calib_mode)
-    # Preserve the established native-3D filenames. Only slice2d CSM products
-    # receive a mode tag, so the shared coil-compression matrix is not duplicated.
+    calibration = f"_{COIL_CALIBRATION_CACHE_TAG}"
     csm_mode = "" if mode == "3d" else "_slice2d"
     return {
-        "wcc": out_folder / f"coil_compression_matrix_ncc{ncc}{suffix}.npy",
-        "csm_low": out_folder / f"csm_acs_ncc{ncc}{csm_mode}{suffix}.npy",
-        "csm_full": out_folder / f"csm_full_ncc{ncc}{csm_mode}{suffix}.npy",
-        "csm_mag": out_folder / f"csm_full_mag_ncc{ncc}{csm_mode}{suffix}.png",
-        "csm_phase": out_folder / f"csm_full_phase_ncc{ncc}{csm_mode}{suffix}.png",
+        "wcc": out_folder
+        / f"coil_compression_matrix_ncc{ncc}{calibration}{suffix}.npy",
+        "csm_low": out_folder
+        / f"csm_acs_ncc{ncc}{csm_mode}{calibration}{suffix}.npy",
+        "csm_full": out_folder
+        / f"csm_full_ncc{ncc}{csm_mode}{calibration}{suffix}.npy",
+        "csm_mag": out_folder
+        / f"csm_full_mag_ncc{ncc}{csm_mode}{calibration}{suffix}.png",
+        "csm_phase": out_folder
+        / f"csm_full_phase_ncc{ncc}{csm_mode}{calibration}{suffix}.png",
+        "manifest": out_folder
+        / f"coil_calibration_ncc{ncc}{csm_mode}{calibration}{suffix}.json",
     }
+
+
+def _validate_coil_cache_manifest(
+    path: Path,
+    *,
+    expected_contract: Mapping[str, Any],
+    wcc_path: Path,
+    csm_full_path: Path,
+) -> None:
+    """Validate cache provenance and artifact hashes before reuse.
+
+    Args:
+        path: Cache-manifest JSON path.
+        expected_contract: Contract recomputed from the current source ACS and
+            reconstruction settings.
+        wcc_path: Cached coil-compression matrix path.
+        csm_full_path: Cached full-resolution sensitivity-map path.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If provenance or artifact hashes differ.
+    """
+
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read coil-calibration cache manifest: {path}") from exc
+    if manifest.get("contract") != dict(expected_contract):
+        raise ValueError(
+            "Cached coil calibration does not match the current source, geometry, "
+            "alias-free readout-crop method, or ESPIRiT settings."
+        )
+    expected_artifacts = {
+        "coil_compression_matrix": {
+            "path": wcc_path.name,
+            "sha256": _file_sha256(wcc_path),
+        },
+        "full_resolution_csm": {
+            "path": csm_full_path.name,
+            "sha256": _file_sha256(csm_full_path),
+        },
+    }
+    if manifest.get("artifacts") != expected_artifacts:
+        raise ValueError("Cached coil-calibration artifact hashes do not match provenance.")
+
+
+def _write_coil_cache_manifest(
+    path: Path,
+    *,
+    contract: Mapping[str, Any],
+    wcc_path: Path,
+    csm_full_path: Path,
+) -> None:
+    """Write a hash-bound coil-calibration cache manifest.
+
+    Args:
+        path: Destination JSON path.
+        contract: Immutable source, geometry, and algorithm contract.
+        wcc_path: Written coil-compression matrix path.
+        csm_full_path: Written full-resolution sensitivity-map path.
+
+    Returns:
+        None.
+    """
+
+    payload = {
+        "contract": dict(contract),
+        "artifacts": {
+            "coil_compression_matrix": {
+                "path": wcc_path.name,
+                "sha256": _file_sha256(wcc_path),
+            },
+            "full_resolution_csm": {
+                "path": csm_full_path.name,
+                "sha256": _file_sha256(csm_full_path),
+            },
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _select_espirit_device(mode: str, gpu_index: int) -> tuple[sp.Device, bool]:
@@ -933,27 +1195,47 @@ def load_or_generate_coil_sens(
     espirit_cpu_workers: int | None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     paths = _coil_cache_paths(out_folder, file_tag, ncc, espirit_calib_mode)
-    if reuse_coil_calib and paths["wcc"].is_file() and paths["csm_full"].is_file():
+    required_cache = (paths["wcc"], paths["csm_full"], paths["manifest"])
+    if reuse_coil_calib and all(path.is_file() for path in required_cache):
         print("Loading cached coil-compression matrix and sensitivity maps...")
-        print(
-            f"ESPIRiT calibration mode {espirit_calib_mode!r} and crop "
-            f"threshold {espirit_crop:g} are not reapplied because cached "
-            "sensitivity maps are being reused."
+        logical_acs = _load_logical_integrated_acs(twix_file, cfg)
+        ncoil = int(logical_acs.shape[-1])
+        expected_contract = _coil_calibration_contract(
+            twix_file=twix_file,
+            cfg=cfg,
+            logical_acs=logical_acs,
+            ncc=ncc,
+            espirit_calib_mode=espirit_calib_mode,
+            espirit_crop=espirit_crop,
         )
-        wcc = np.load(paths["wcc"])
-        csm_full = np.load(paths["csm_full"])
-        ref = _check_integrated_refscan_shape(
-            load_ref(str(twix_file)),
-            ncalib1=int(cfg["Ncalib1"]),
-            nacs=int(cfg["Nacs"]),
-            nsets=int(cfg["Nsets"]),
+        _validate_coil_cache_manifest(
+            paths["manifest"],
+            expected_contract=expected_contract,
+            wcc_path=paths["wcc"],
+            csm_full_path=paths["csm_full"],
         )
-        ncoil = int(ref.shape[-1])
+        wcc = np.load(paths["wcc"], allow_pickle=False)
+        csm_full = np.load(paths["csm_full"], allow_pickle=False)
         _check_cc_and_csm(wcc, csm_full, ncoil=ncoil, ncc=ncc, cfg=cfg)
+        if not np.isfinite(wcc).all() or not np.isfinite(csm_full).all():
+            raise ValueError("Cached coil calibration contains non-finite values.")
+        print(
+            "Reused hash-bound alias-free coil calibration with centered "
+            "image-domain readout cropping."
+        )
         return wcc, csm_full, ncoil
 
     if reuse_coil_calib:
-        print("Cached coil calibration was incomplete; recomputing from integrated ACS.")
+        present = [path for path in required_cache if path.exists()]
+        if present:
+            raise ValueError(
+                "Alias-free coil-calibration cache is incomplete; use a new output "
+                "folder or file tag rather than mixing cache generations."
+            )
+        print(
+            "No compatible alias-free coil-calibration cache exists; recomputing "
+            "from integrated ACS. Historical stride-derived cache names are ignored."
+        )
     return generate_coil_sens(
         twix_file=twix_file,
         cfg=cfg,
@@ -1013,41 +1295,31 @@ def generate_coil_sens(
         print("ESPIRiT device: CPU (required by slice2d)")
     else:
         device, using_gpu = _select_espirit_device(espirit_device, espirit_gpu_index)
-    ref = _check_integrated_refscan_shape(
-        load_ref(str(twix_file)),
-        ncalib1=int(cfg["Ncalib1"]),
-        nacs=int(cfg["Nacs"]),
-        nsets=int(cfg["Nsets"]),
-    )
-
+    kspace_acs = _load_logical_integrated_acs(twix_file, cfg)
     nacs = int(cfg["Nacs"])
-    acs_set_id = int(cfg["ACSSetID"])
-    kspace_acs = ref[:, :nacs, :nacs, acs_set_id, :]
-    nx_os, ny_acs, nz_acs, ncoil = map(int, kspace_acs.shape)
+    nx, ny_acs, nz_acs, ncoil = map(int, kspace_acs.shape)
     if ncc > ncoil:
         raise ValueError(f"Requested ncc={ncc}, but the TWIX refscan has only {ncoil} coils.")
-    if nx_os != int(cfg["Nx_os"]):
+    if nx != int(cfg["Nx"]):
         raise ValueError(
-            f"Refscan readout length {nx_os} does not match sequence Nx_os={cfg['Nx_os']}."
+            f"Logical ACS readout {nx} does not match sequence Nx={cfg['Nx']}."
         )
-    print(f"Integrated ACS shape: {tuple(kspace_acs.shape)}")
+    print(f"Alias-free logical integrated ACS shape: {tuple(kspace_acs.shape)}")
 
     wcc, _, cc_energy = estimate_cc_matrix_coillast(
         kspace_acs,
         ncc=ncc,
         acs=min(ny_acs, nz_acs),
-        x_step=int(cfg["os_factor"]),
     )
     print(f"Coil-compression matrix: {wcc.shape}")
     print(f"Energy retained by {ncc} coils: {float(cc_energy[ncc - 1]):.6f}")
 
     kspace_np = (
-        kspace_acs.permute(3, 0, 1, 2)[:, :: int(cfg["os_factor"])]
+        kspace_acs.permute(3, 0, 1, 2)
         .contiguous()
         .numpy()
         .astype(np.complex64, copy=False)
     )
-    nx = int(cfg["Nx"])
     low_y = min(32, ny_acs, int(cfg["Ny"]))
     low_z = min(32, nz_acs, int(cfg["Nz"]))
     low_shape = (ncoil, nx, low_y, low_z)
@@ -1098,6 +1370,20 @@ def generate_coil_sens(
     np.save(paths["wcc"], np.asarray(wcc))
     np.save(paths["csm_low"], csm_low_cc_np)
     np.save(paths["csm_full"], csm_full)
+    contract = _coil_calibration_contract(
+        twix_file=twix_file,
+        cfg=cfg,
+        logical_acs=kspace_acs,
+        ncc=ncc,
+        espirit_calib_mode=espirit_calib_mode,
+        espirit_crop=espirit_crop,
+    )
+    _write_coil_cache_manifest(
+        paths["manifest"],
+        contract=contract,
+        wcc_path=paths["wcc"],
+        csm_full_path=paths["csm_full"],
+    )
 
     plot_csm_magnitude_grid(csm_full, z=csm_full.shape[-1] // 2)
     plt.savefig(paths["csm_mag"], dpi=150, bbox_inches="tight")
@@ -1121,19 +1407,21 @@ def _build_bart_calibration_kspace(
     cfg: Mapping[str, Any],
     wcc: np.ndarray,
 ) -> np.ndarray:
-    """Return compressed, readout-decimated ACS on BART's full image grid."""
+    """Return compressed, alias-free ACS on BART's full image grid.
 
-    ref = _check_integrated_refscan_shape(
-        load_ref(str(twix_file)),
-        ncalib1=int(cfg["Ncalib1"]),
-        nacs=int(cfg["Nacs"]),
-        nsets=int(cfg["Nsets"]),
-    )
+    Args:
+        twix_file: Integrated Wave-GRE TWIX source.
+        cfg: Validated GRE sequence configuration.
+        wcc: Physical-to-virtual coil-compression matrix.
+
+    Returns:
+        Logical-readout, coil-last calibration k-space embedded on the native
+        BART LIN/PAR grid.
+    """
+
     nacs = int(cfg["Nacs"])
-    acs_set_id = int(cfg["ACSSetID"])
-    kspace_acs = ref[:, :nacs, :nacs, acs_set_id, :]
+    kspace_acs = _load_logical_integrated_acs(twix_file, cfg)
     kspace_acs_cc = apply_cc_coillast_torch(kspace_acs, wcc, x_chunk=8)
-    kspace_acs_cc = kspace_acs_cc[:: int(cfg["os_factor"])]
 
     sx = int(cfg["Nx"])
     sy = int(cfg["Ny"])
@@ -2679,6 +2967,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 coil_sens=csm_full,
                 kspace_calib=kspace_calib,
                 psf_calibration=psf_processing_diagnostics,
+                coil_calibration={
+                    "source": "integrated refscan set 4",
+                    "readout_oversampling_removal": {
+                        **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
+                        "input_readout": int(cfg["Nx_os"]),
+                        "output_readout": int(cfg["Nx"]),
+                        "oversampling_factor": int(cfg["os_factor"]),
+                    },
+                    "kspace_calib_shape": list(kspace_calib.shape),
+                    "finite": bool(np.isfinite(kspace_calib).all()),
+                },
             )
             print(f"Saved BART Wave-CAIPI inputs: {manifest_path}")
     images = reconstruct_echoes(

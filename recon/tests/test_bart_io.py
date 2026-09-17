@@ -62,7 +62,7 @@ class BartIoTests(unittest.TestCase):
                 self.assertTrue((Path(folder) / f"psf{suffix}.hdr").is_file())
 
     def test_records_shared_psf_calibration_provenance(self) -> None:
-        """The BART manifest should retain shared automatic-fit diagnostics."""
+        """The BART manifest should retain PSF and coil-calibration provenance."""
 
         diagnostics = {
             "coefficient_processing": "sine-line",
@@ -74,6 +74,14 @@ class BartIoTests(unittest.TestCase):
                 "shared_across_echoes": True,
             },
         }
+        coil_calibration = {
+            "source": "integrated refscan set 4",
+            "readout_oversampling_removal": {
+                "method": "centered-image-domain-crop",
+                "version": 1,
+                "fft_normalization": "ortho",
+            },
+        }
         with tempfile.TemporaryDirectory() as folder:
             manifest_path = export_wave_inputs(
                 folder,
@@ -82,10 +90,12 @@ class BartIoTests(unittest.TestCase):
                 coil_sens=np.ones((2, 4, 3, 2), np.complex64),
                 kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
                 psf_calibration=diagnostics,
+                coil_calibration=coil_calibration,
             )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["psf_calibration"], diagnostics)
+        self.assertEqual(manifest["coil_calibration"], coil_calibration)
 
 
 if __name__ == "__main__":

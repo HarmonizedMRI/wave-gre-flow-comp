@@ -91,7 +91,12 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --espirit-cpu-workers 16
 ```
 
-The native 3D and slice2d CSM files use separate cache names, while the coil-compression matrix is shared.
+Before either backend, integrated set-4 ACS readout oversampling is removed by
+a centered IFFT, central nominal-FOV image crop, and centered FFT. Direct
+k-space striding is forbidden because it aliases outside-FOV anatomy into the
+coil calibration. Native 3D and slice2d CSM files use separate versioned cache
+names, while the coil-compression matrix is shared. A hash-bound JSON manifest
+prevents reuse of historical stride-derived caches or mismatched settings.
 
 ## Clone
 
