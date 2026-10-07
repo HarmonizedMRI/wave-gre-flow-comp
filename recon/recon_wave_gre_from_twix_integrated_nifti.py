@@ -488,6 +488,19 @@ def _as_float_array(value: Any, name: str, min_length: int = 1) -> np.ndarray:
     return arr
 
 
+def _centered_accelerated_label_geometry(matrix: int, acceleration: int) -> tuple[int, int]:
+    """Return measured count and mapVBVD extent for centered global labels."""
+    if matrix <= 0 or acceleration <= 0:
+        raise ValueError(
+            "Centered acceleration requires positive matrix and acceleration; "
+            f"got matrix={matrix}, acceleration={acceleration}."
+        )
+    center_label = matrix // 2
+    labels = np.arange(matrix, dtype=np.int64)
+    acquired = labels[(labels - center_label) % acceleration == 0]
+    return int(acquired.size), int(acquired[-1] + 1)
+
+
 def _derive_gre_config(
     seq: pp.Sequence,
     yflip_override: int | None = None,
@@ -542,8 +555,21 @@ def _derive_gre_config(
 
     ry = _as_int(_get_definition(defs, ("Ry", "R_y"), 1), "Ry")
     rz = _as_int(_get_definition(defs, ("Rz", "R_z"), 1), "Rz")
-    ny_meas = _as_int(_get_definition(defs, "Ny_meas", int(np.ceil(ny / ry))), "Ny_meas")
-    nz_meas = _as_int(_get_definition(defs, "Nz_meas", int(np.ceil(nz / rz))), "Nz_meas")
+    ny_count_expected, ny_label_extent = _centered_accelerated_label_geometry(ny, ry)
+    nz_count_expected, nz_label_extent = _centered_accelerated_label_geometry(nz, rz)
+    ny_meas = _as_int(
+        _get_definition(defs, "Ny_meas", ny_count_expected), "Ny_meas"
+    )
+    nz_meas = _as_int(
+        _get_definition(defs, "Nz_meas", nz_count_expected), "Nz_meas"
+    )
+    if ny_meas != ny_count_expected or nz_meas != nz_count_expected:
+        raise ValueError(
+            "Measured PE counts disagree with the centered global-label sampling pattern: "
+            f"sequence Ny_meas/Nz_meas={ny_meas}/{nz_meas}, expected "
+            f"{ny_count_expected}/{nz_count_expected} for matrix/acceleration "
+            f"{ny}x{nz} at R{ry}x{rz}."
+        )
 
     ncalib1 = _as_int(
         _get_definition(defs, ("CalibrationNcalib1", "Calibration_Ncalib1"), 72),
@@ -625,6 +651,8 @@ def _derive_gre_config(
         "Rz": rz,
         "Ny_meas": ny_meas,
         "Nz_meas": nz_meas,
+        "Ny_label_extent": ny_label_extent,
+        "Nz_label_extent": nz_label_extent,
         "Ncalib1": ncalib1,
         "Ncalib2": ncalib2,
         "Nacs": nacs,
@@ -2392,14 +2420,16 @@ def _report_seq_twix_geometry(
         "ExpectedReadoutOversampled": int(cfg["Nx_os"]),
         "ExpectedLINMeasured": int(cfg["Ny_meas"]),
         "ExpectedPARMeasured": int(cfg["Nz_meas"]),
+        "ExpectedLINLabelExtent": int(cfg["Ny_label_extent"]),
+        "ExpectedPARLabelExtent": int(cfg["Nz_label_extent"]),
         "ExpectedEchoCount": int(cfg["Necho"]),
         "ReceivedReadoutSamples": received[0],
         "ReceivedLINExtent": received[1],
         "ReceivedPARExtent": received[2],
         "ReceivedEchoCount": received[3],
         "ReadoutSamplesMatch": received[0] == int(cfg["Nx_os"]),
-        "LINExtentMatch": received[1] == int(cfg["Ny_meas"]),
-        "PARExtentMatch": received[2] == int(cfg["Nz_meas"]),
+        "LINExtentMatch": received[1] == int(cfg["Ny_label_extent"]),
+        "PARExtentMatch": received[2] == int(cfg["Nz_label_extent"]),
         "EchoCountMatch": received[3] == int(cfg["Necho"]),
     }
     passed = passed and all(
@@ -2463,7 +2493,9 @@ def _report_seq_twix_geometry(
     print(
         "  Matrix: "
         f"received RO_os/LIN/PAR/Echo={received[:4]}, "
-        f"expected=({cfg['Nx_os']}, {cfg['Ny_meas']}, {cfg['Nz_meas']}, {cfg['Necho']})"
+        f"expected extents=({cfg['Nx_os']}, {cfg['Ny_label_extent']}, "
+        f"{cfg['Nz_label_extent']}, {cfg['Necho']}); measured LIN/PAR counts="
+        f"({cfg['Ny_meas']}, {cfg['Nz_meas']})"
     )
     print(f"  Readout direction: {directions['ReadoutDirectionPatient']}")
     print(f"  LIN phase-encoding direction: {directions['LINPhaseEncodingDirectionPatient']}")

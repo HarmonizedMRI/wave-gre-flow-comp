@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -36,6 +37,107 @@ def _quality(length: int) -> dict[str, dict[str, np.ndarray]]:
 
 
 class GrePsfCalibrationTests(unittest.TestCase):
+    def test_config_separates_measured_counts_from_global_label_extents(self) -> None:
+        """Sparse global LIN/PAR labels must retain their mapVBVD extents."""
+
+        sequence = self._r4x3_sequence()
+
+        cfg = native._derive_gre_config(sequence)
+
+        self.assertEqual((cfg["Ny_meas"], cfg["Nz_meas"]), (63, 24))
+        self.assertEqual(
+            (cfg["Ny_label_extent"], cfg["Nz_label_extent"]), (250, 70)
+        )
+
+    def test_geometry_diagnostic_accepts_global_label_extents(self) -> None:
+        """R4x3 TWIX extents must not be compared with 63x24 sample counts."""
+
+        cfg = native._derive_gre_config(self._r4x3_sequence())
+        twix_info = {
+            "FOV": {"readout": 224.0, "phase": 220.0, "slice": 180.0},
+            "NormalRAS": [0.0, 0.0, 1.0],
+            "ReadoutDirectionRAS": [1.0, 0.0, 0.0],
+            "PhaseDirectionRAS": [0.0, 1.0, 0.0],
+            "SliceDirectionRAS": [0.0, 0.0, 1.0],
+        }
+        with patch(
+            "utils.nifti_export_twix.make_nifti_affine_from_twix",
+            return_value=(None, None, twix_info),
+        ):
+            result = native._report_seq_twix_geometry(
+                twix_file=Path("input.dat"),
+                cfg=cfg,
+                received_image_shape=(1680, 250, 70, 2, 32),
+                voxel_size_mm=(224 / 420, 220 / 250, 180 / 72),
+                twix_array_axis_roles=("readout", "phase", "slice"),
+                twix_array_axis_flips=(False, False, False),
+                twix_coord_system="LPS",
+                twix_inplane_rot_sign=-1.0,
+            )
+
+        self.assertTrue(result["Passed"])
+        checks = result["MatrixChecks"]
+        self.assertEqual(checks["ExpectedLINMeasured"], 63)
+        self.assertEqual(checks["ExpectedPARMeasured"], 24)
+        self.assertEqual(checks["ExpectedLINLabelExtent"], 250)
+        self.assertEqual(checks["ExpectedPARLabelExtent"], 70)
+
+    def test_config_rejects_inconsistent_measured_counts(self) -> None:
+        """Definitions must match the centered accelerated label pattern."""
+
+        with self.assertRaisesRegex(ValueError, "Measured PE counts disagree"):
+            native._derive_gre_config(
+                SimpleNamespace(
+                    definitions={
+                        "OrientationMapping": "TRA",
+                        "Nx": 8,
+                        "Ny": 10,
+                        "Nz": 8,
+                        "ReadoutOversamplingFactor": 4,
+                        "FOV": [0.2, 0.2, 0.2],
+                        "Nechoes": 1,
+                        "TE": [0.01],
+                        "Averages": 1,
+                        "Ry": 3,
+                        "Rz": 2,
+                        "Ny_meas": 4,
+                        "Nz_meas": 3,
+                    }
+                )
+            )
+
+    @staticmethod
+    def _r4x3_sequence() -> SimpleNamespace:
+        """Return the generated R4x3 GRE definition contract."""
+
+        return SimpleNamespace(
+            definitions={
+                "OrientationMapping": "TRA",
+                "Nx": 420,
+                "Ny": 250,
+                "Nz": 72,
+                "Nx_os": 1680,
+                "ReadoutOversamplingFactor": 4,
+                "FOV": [0.224, 0.220, 0.180],
+                "Nechoes": 2,
+                "TE": [0.00709, 0.01597],
+                "Averages": 1,
+                "Ry": 4,
+                "Rz": 3,
+                "Ny_meas": 63,
+                "Nz_meas": 24,
+                "CalibrationNcalib1": 72,
+                "CalibrationNcalib2": 1,
+                "CalibrationNacs": 32,
+                "CalibrationNSets": 5,
+                "CalibrationACSSetID": 4,
+                "WaveSinChannel": "y",
+                "WaveCosChannel": "z",
+                "KspaceOrdering": "negative_to_positive",
+                "UseFlowComp": 1,
+            }
+        )
+
     @staticmethod
     def _coil_cfg() -> dict[str, object]:
         """Return a compact GRE coil-calibration configuration fixture.

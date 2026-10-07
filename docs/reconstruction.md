@@ -51,7 +51,7 @@ The current verified reconstruction expects:
 
 Sine-only and cosine-only wave image acquisitions are rejected.
 
-At the beginning of a normal reconstruction, the updated code prints warning-only `.seq`/TWIX geometry diagnostics. These compare FOV and received dimensions, retain the verified transverse assertion, and report readout, LIN phase-encoding, and PAR phase-encoding directions. A mismatch is reported for investigation but does not stop reconstruction.
+At the beginning of a normal reconstruction, the updated code prints warning-only `.seq`/TWIX geometry diagnostics. These compare FOV and received dimensions, retain the verified transverse assertion, and report readout, LIN phase-encoding, and PAR phase-encoding directions. For accelerated image data, the diagnostic reports the measured LIN/PAR counts separately from the mapVBVD array extents implied by the maximum global LIN/PAR labels. A mismatch is reported for investigation but does not stop reconstruction.
 
 ## Basic commands
 
