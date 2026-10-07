@@ -48,6 +48,20 @@ class BartIoTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["echoes"][0]["wave_kspace"], "wave_kspace")
 
+    def test_bart_ecalib_export_omits_python_sensitivity_maps(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            manifest_path = export_wave_inputs(
+                folder,
+                wave_kspace=np.ones((8, 3, 2, 1, 2), np.complex64),
+                calibrated_psf=np.ones((1, 8, 3, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertNotIn("coil_sens", manifest)
+            self.assertFalse((Path(folder) / "coil_sens.hdr").exists())
+            self.assertTrue((Path(folder) / "kspace_calib.hdr").is_file())
+
     def test_multi_echo_uses_matching_suffixes(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             export_wave_inputs(

@@ -167,13 +167,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reuse-coil-calib",
         action="store_true",
-        help="Reuse cached coil-compression matrix and CSM files when present.",
+        help=(
+            "Reuse the coil-compression matrix; the explicit SENSE backend "
+            "also reuses its compatible CSM cache."
+        ),
     )
     parser.add_argument(
         "--espirit-device",
         choices=("auto", "cpu", "gpu"),
         default="auto",
-        help="Device used for ESPIRiT calibration.",
+        help="SigPy ESPIRiT device used only by the explicit SENSE backend.",
     )
     parser.add_argument(
         "--espirit-gpu-index",
@@ -1094,6 +1097,8 @@ def _coil_cache_paths(
     return {
         "wcc": out_folder
         / f"coil_compression_matrix_ncc{ncc}{calibration}{suffix}.npy",
+        "wcc_bart_manifest": out_folder
+        / f"coil_compression_bart_ncc{ncc}{calibration}{suffix}.json",
         "csm_low": out_folder
         / f"csm_acs_ncc{ncc}{csm_mode}{calibration}{suffix}.npy",
         "csm_full": out_folder
@@ -1294,6 +1299,104 @@ def load_or_generate_coil_sens(
     )
 
 
+def load_or_generate_coil_compression_for_bart(
+    *,
+    twix_file: Path,
+    cfg: Mapping[str, Any],
+    out_folder: Path,
+    file_tag: str,
+    ncc: int,
+    reuse_coil_calib: bool,
+) -> tuple[np.ndarray, torch.Tensor, int]:
+    """Prepare only Wcc and logical ACS; BART ecalib estimates the maps."""
+
+    logical_acs = _load_logical_integrated_acs(twix_file, cfg)
+    ncoil = int(logical_acs.shape[-1])
+    if ncc > ncoil:
+        raise ValueError(
+            f"Requested ncc={ncc}, but the TWIX refscan has only {ncoil} coils."
+        )
+    paths = _coil_cache_paths(out_folder, file_tag, ncc, "3d")
+    source = twix_file.stat()
+    contract = {
+        "format_version": 1,
+        "source_twix": {
+            "path": str(twix_file.resolve()),
+            "size_bytes": int(source.st_size),
+            "mtime_ns": int(source.st_mtime_ns),
+        },
+        "logical_acs": {
+            "shape": list(logical_acs.shape),
+            "sha256": _array_sha256(logical_acs),
+        },
+        "coil_compression": {
+            "physical_coils": ncoil,
+            "virtual_coils": int(ncc),
+            "readout_stride": 1,
+        },
+        "readout_oversampling_removal": {
+            **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
+            "input_readout": int(cfg["Nx_os"]),
+            "output_readout": int(cfg["Nx"]),
+            "oversampling_factor": int(cfg["os_factor"]),
+        },
+    }
+    cache_present = paths["wcc"].is_file()
+    manifest_present = paths["wcc_bart_manifest"].is_file()
+    if reuse_coil_calib and cache_present and manifest_present:
+        print(f"Loading cached coil compression matrix: {paths['wcc']}")
+        cache_manifest = json.loads(
+            paths["wcc_bart_manifest"].read_text(encoding="utf-8")
+        )
+        expected_artifact = {
+            "path": paths["wcc"].name,
+            "sha256": _file_sha256(paths["wcc"]),
+        }
+        if (
+            cache_manifest.get("contract") != contract
+            or cache_manifest.get("artifact") != expected_artifact
+        ):
+            raise ValueError(
+                "Cached BART coil compression does not match the current "
+                "TWIX source, logical ACS, or compression contract."
+            )
+        wcc = np.load(paths["wcc"], allow_pickle=False)
+        if wcc.shape != (ncoil, ncc) or not np.isfinite(wcc).all():
+            raise ValueError(
+                "Cached coil compression matrix is incompatible with the "
+                f"current ACS: received {wcc.shape}, expected {(ncoil, ncc)}."
+            )
+    else:
+        if reuse_coil_calib:
+            if cache_present or manifest_present:
+                raise ValueError(
+                    "BART coil-compression cache is incomplete; use a new output "
+                    "folder or file tag rather than mixing cache generations."
+                )
+            print("No compatible Wcc cache found; recomputing from logical ACS.")
+        wcc, _, cc_energy = estimate_cc_matrix_coillast(
+            logical_acs,
+            ncc=ncc,
+            acs=min(int(logical_acs.shape[1]), int(logical_acs.shape[2])),
+        )
+        print(f"Coil-compression matrix: {wcc.shape}")
+        print(f"Energy retained by {ncc} coils: {float(cc_energy[ncc - 1]):.6f}")
+        np.save(paths["wcc"], np.asarray(wcc))
+        print(f"Saved coil compression matrix: {paths['wcc']}")
+        cache_manifest = {
+            "contract": contract,
+            "artifact": {
+                "path": paths["wcc"].name,
+                "sha256": _file_sha256(paths["wcc"]),
+            },
+        }
+        paths["wcc_bart_manifest"].write_text(
+            json.dumps(cache_manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return np.asarray(wcc), logical_acs, ncoil
+
+
 def _check_cc_and_csm(
     wcc: np.ndarray,
     csm_full: np.ndarray,
@@ -1450,6 +1553,7 @@ def _build_bart_calibration_kspace(
     twix_file: Path,
     cfg: Mapping[str, Any],
     wcc: np.ndarray,
+    logical_acs: torch.Tensor | None = None,
 ) -> np.ndarray:
     """Return compressed, alias-free ACS on BART's full image grid.
 
@@ -1464,7 +1568,11 @@ def _build_bart_calibration_kspace(
     """
 
     nacs = int(cfg["Nacs"])
-    kspace_acs = _load_logical_integrated_acs(twix_file, cfg)
+    kspace_acs = (
+        _load_logical_integrated_acs(twix_file, cfg)
+        if logical_acs is None
+        else logical_acs
+    )
     kspace_acs_cc = apply_cc_coillast_torch(kspace_acs, wcc, x_chunk=8)
 
     sx = int(cfg["Nx"])
@@ -2894,7 +3002,7 @@ def _run_bart_reconstruction(
     bart_output_folder: Path,
     runtime: Mapping[str, Any],
 ) -> None:
-    """Run the repository BART wrapper with its wavelet/FISTA defaults."""
+    """Run the repository BART wrapper with its GPU wavelet/FISTA defaults."""
 
     wrapper = Path(__file__).resolve().parent / "bart" / "run_wave_recon.sh"
     command = [
@@ -2941,7 +3049,7 @@ def _run_bart_reconstruction(
             command.append("--twix-use-fov-for-voxel-size")
         command.append("--end-nifti-options")
 
-    print("Running BART Wave-CAIPI reconstruction with default wavelet/FISTA...")
+    print("Running BART Wave-CAIPI reconstruction with default GPU wavelet/FISTA...")
     subprocess.run(command, check=True)
 
 # -----------------------------------------------------------------------------
@@ -2978,6 +3086,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         raise ValueError("--save-bart-inputs requires a wave acquisition.")
 
+    logical_acs = None
+    if runtime["reconstruction_backend"] == "bart":
+        print("Preparing coil compression for BART; skipping SigPy ESPIRiT...")
+        wcc, logical_acs, ncoil_ref = load_or_generate_coil_compression_for_bart(
+            twix_file=runtime["twix_file"],
+            cfg=cfg,
+            out_folder=runtime["out_folder"],
+            file_tag=runtime["file_tag"],
+            ncc=runtime["ncc"],
+            reuse_coil_calib=runtime["reuse_coil_calib"],
+        )
+        csm_full = None
+    else:
+        print("Preparing coil-compression matrix and sensitivity maps...")
+        wcc, csm_full, ncoil_ref = load_or_generate_coil_sens(
+            twix_file=runtime["twix_file"],
+            cfg=cfg,
+            out_folder=runtime["out_folder"],
+            file_tag=runtime["file_tag"],
+            ncc=runtime["ncc"],
+            reuse_coil_calib=runtime["reuse_coil_calib"],
+            espirit_device=runtime["espirit_device"],
+            espirit_gpu_index=runtime["espirit_gpu_index"],
+            espirit_crop=runtime["espirit_crop"],
+            espirit_calib_mode=runtime["espirit_calib_mode"],
+            espirit_cpu_workers=runtime["espirit_cpu_workers"],
+        )
+
     print("Importing GRE image data from integrated TWIX file...")
     img = _normalize_gre_image_data(load_img(str(runtime["twix_file"])), cfg)
     ncoil = int(img.shape[-1])
@@ -2992,45 +3128,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         twix_coord_system=runtime["twix_coord_system"],
         twix_inplane_rot_sign=runtime["twix_inplane_rot_sign"],
     )
-
-    print("Preparing coil-compression matrix and sensitivity maps...")
-    wcc, csm_full, ncoil_ref = load_or_generate_coil_sens(
-        twix_file=runtime["twix_file"],
-        cfg=cfg,
-        out_folder=runtime["out_folder"],
-        file_tag=runtime["file_tag"],
-        ncc=runtime["ncc"],
-        reuse_coil_calib=runtime["reuse_coil_calib"],
-        espirit_device=runtime["espirit_device"],
-        espirit_gpu_index=runtime["espirit_gpu_index"],
-        espirit_crop=runtime["espirit_crop"],
-        espirit_calib_mode=runtime["espirit_calib_mode"],
-        espirit_cpu_workers=runtime["espirit_cpu_workers"],
-    )
     if ncoil_ref != ncoil:
         raise ValueError(
             f"Image/refscan coil-count mismatch: image has {ncoil}, refscan has {ncoil_ref}."
         )
-    kspace_full = _embed_full_kspace(img, cfg)
-    kspace_cc = torch.empty(
-        (*kspace_full.shape[:-1], runtime["ncc"]), dtype=torch.complex64
+    kspace_cc = torch.zeros(
+        (
+            int(cfg["Nx_os"]),
+            int(cfg["Ny"]),
+            int(cfg["Nz"]),
+            int(cfg["Necho"]),
+            runtime["ncc"],
+        ),
+        dtype=torch.complex64,
     )
     for echo_idx in range(int(cfg["Necho"])):
         print(f"Coil-compressing echo {echo_idx + 1}/{cfg['Necho']}...")
-        kspace_cc[:, :, :, echo_idx, :] = apply_cc_coillast_torch(
-            kspace_full[:, :, :, echo_idx, :],
+        compressed_acquired = apply_cc_coillast_torch(
+            img[:, :, :, echo_idx, :],
             wcc,
             x_chunk=8,
         )
+        kspace_cc[
+            :, : img.shape[1], : img.shape[2], echo_idx, :
+        ] = compressed_acquired
+        del compressed_acquired
+    del img
+    gc.collect()
     stem = _recon_stem(cfg, mode, runtime["file_tag"])
-    _save_complex_npy(
-        runtime["out_folder"] / f"kspace_cc_{stem}.npy",
-        kspace_cc,
-        "coil-compressed multi-echo k-space",
-    )
-
-    sens = _build_sensitivity_tensor(csm_full, cfg)
-    masks = _sampling_masks(kspace_cc)
+    if runtime["reconstruction_backend"] == "sense":
+        _save_complex_npy(
+            runtime["out_folder"] / f"kspace_cc_{stem}.npy",
+            kspace_cc,
+            "coil-compressed multi-echo k-space",
+        )
     psf_calib_echoes: torch.Tensor | None = None
     psf_processing_diagnostics: dict[str, Any] | None = None
     if mode == "wave":
@@ -3069,6 +3200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 twix_file=runtime["twix_file"],
                 cfg=cfg,
                 wcc=wcc,
+                logical_acs=logical_acs,
             )
             manifest_path = export_wave_inputs(
                 bart_folder,
@@ -3105,6 +3237,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print("Reconstruction completed successfully.")
                 return 0
+    if csm_full is None:
+        raise RuntimeError("The SENSE backend requires SigPy sensitivity maps.")
+    sens = _build_sensitivity_tensor(csm_full, cfg)
+    masks = _sampling_masks(kspace_cc)
     images = reconstruct_echoes(
         kspace_cc=kspace_cc,
         sens=sens,

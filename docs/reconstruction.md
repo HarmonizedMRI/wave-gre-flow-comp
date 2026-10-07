@@ -103,11 +103,12 @@ This checks the sequence trajectory and definitions without loading imaging data
    and centered FFT.
 6. Estimate the requested coil-compression matrix from that alias-free logical
    ACS on CPU.
-7. Generate low-resolution ESPIRiT maps using native 3D calibration or CPU-parallel logical-RO slice2d calibration.
-8. Interpolate and normalize the sensitivity maps.
+7. For the default BART backend, skip SigPy ESPIRiT and export the compressed
+   integrated ACS for `bart ecalib`.
+8. Only for the explicit SENSE backend, generate and interpolate SigPy ESPIRiT maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
 10. For wave data, fit FLASH projection phase deviations, process the fitted PSF coefficients using the selected method, and construct calibrated echo-specific PSFs.
-11. By default, export BART inputs and run `bart wave -w -f` for every echo.
+11. By default, run `bart ecalib`, then `bart wave -w -f -g` for every echo.
 12. When `--reconstruction-backend sense` is explicitly selected, run the
     legacy wave or no-wave CG-SENSE solver on CPU for each echo.
 13. Save backend-appropriate outputs, diagnostics, and optional NIfTI outputs.
@@ -120,8 +121,9 @@ The full reconstruction is not moved to GPU.
 |---|---|
 | Coil-compression estimation | CPU / NumPy and SciPy |
 | Coil-compression application | CPU / PyTorch tensor |
-| ESPIRiT calibration | native `3d`: SigPy CPU/GPU; `slice2d`: CPU processes |
-| Default Wave reconstruction | BART wavelet/FISTA |
+| Default sensitivity-map calibration | BART `ecalib` |
+| SigPy ESPIRiT | Explicit SENSE backend only |
+| Default Wave reconstruction | BART GPU wavelet/FISTA |
 | Explicit legacy Wave/no-wave CG-SENSE | CPU / PyTorch tensor |
 
 ### ESPIRiT selection
@@ -209,7 +211,7 @@ order:
 |---|---|---|
 | `wave_kspace` | `(Nx_os, Ny, Nz, Ncc, 1)` | Coil-compressed acquired k-space |
 | `psf` | `(Nx_os, Ny, Nz, 1, 1)` | Calibrated wave PSF |
-| `coil_sens` | `(Nx, Ny, Nz, Ncc, 1)` | Sensitivity maps from this reconstruction |
+| `coil_sens` | `(Nx, Ny, Nz, Ncc, 1)` | Optional; exported only from the explicit SENSE path for `--maps-source existing` |
 | `kspace_calib` | `(Nx, Ny, Nz, Ncc)` | Coil-compressed, centered integrated ACS for BART `ecalib` |
 
 Multi-echo acquisitions write matching `_echo-01`, `_echo-02`, and so on
@@ -237,7 +239,7 @@ The flags between `--ecalib-options` and `--end-ecalib-options` are passed
 unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
 section is passed unchanged to `bart wave`; the example requests wavelet
 regularization and FISTA. When the section is omitted, the wrapper defaults to
-`-w -f`. The helper prints each complete command before running it. Pass
+`-w -f -g`. The helper prints each complete command before running it. Pass
 `--skip-nifti` to stop after BART reconstruction. Otherwise, if
 `--nifti-output` is omitted, converted files are written to
 `BART_OUTPUT/nifti`; pass the option only to override that location. Conversion

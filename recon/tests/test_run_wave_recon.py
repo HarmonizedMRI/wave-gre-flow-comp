@@ -190,6 +190,8 @@ set -euo pipefail
         self.assertEqual(python_call[output_index + 1], str(self.nifti_output))
 
     def test_defaults_to_wavelet_fista_and_can_skip_nifti(self) -> None:
+        (self.bart_input / "coil_sens.hdr").unlink()
+        (self.bart_input / "coil_sens.cfl").unlink()
         command = self._base_command("bart") + ["--skip-nifti"]
         result = subprocess.run(
             command,
@@ -200,10 +202,10 @@ set -euo pipefail
         )
 
         bart_calls = _read_calls(self.bart_log)
-        self.assertEqual(bart_calls[1][0:3], ["wave", "-w", "-f"])
+        self.assertEqual(bart_calls[1][0:4], ["wave", "-w", "-f", "-g"])
         self.assertFalse(self.python_log.exists())
         self.assertFalse((self.bart_output / "nifti").exists())
-        self.assertIn("wavelet/FISTA defaults: -w -f", result.stdout)
+        self.assertIn("GPU wavelet/FISTA defaults: -w -f -g", result.stdout)
         self.assertIn("NIfTI conversion was skipped", result.stdout)
 
     def test_rejects_wavelet_and_llr_together(self) -> None:

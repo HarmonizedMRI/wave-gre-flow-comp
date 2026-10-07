@@ -44,8 +44,9 @@ Direct option sections:
       because the NIfTI converter accepts one ESPIRiT map set.
 
   --wave-options ... --end-wave-options
-      Passed unchanged to `bart wave`. When omitted, the wrapper uses `-w -f`
-      (wavelet regularization with FISTA). Common BART wave options are:
+      Passed unchanged to `bart wave`. When omitted, the wrapper uses
+      `-w -f -g` (wavelet regularization with FISTA on GPU). Common BART wave
+      options are:
         -w          wavelet regularization
         -l          locally low-rank (LLR) regularization
         -r VALUE    regularization strength
@@ -220,8 +221,8 @@ array_contains -m "${ECALIB_OPTIONS[@]}" &&
     fail "Do not pass -m in --ecalib-options; this workflow explicitly uses -m 1."
 
 if ((${#WAVE_OPTIONS[@]} == 0)); then
-    WAVE_OPTIONS=(-w -f)
-    echo "No --wave-options supplied; using BART wavelet/FISTA defaults: -w -f"
+    WAVE_OPTIONS=(-w -f -g)
+    echo "No --wave-options supplied; using BART GPU wavelet/FISTA defaults: -w -f -g"
 fi
 
 USES_WAVELET=0
