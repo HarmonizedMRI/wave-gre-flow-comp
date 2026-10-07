@@ -43,6 +43,28 @@ generated_seq_v151/   current Pulseq v1.5.x files
 
 The current script enables legacy v1.4.1 output as well as the current format. Confirm the format supported by the scanner interpreter before use.
 
+## High-slew parity-aware full-FC evaluation entry point
+
+`seq/gre_3d_wave_with_flash_calibration_sag_high_slew_cases.m` is the
+separate sagittal evaluation source for the coupled C10/A12.732,
+C20/A6.3662, and C25/A5.093 mT/m cases. Set `Ncycles` to 10, 20, or 25 and
+set `centerWaveAroundNowave` to `false` (`sinzero`) or `true` (`sinctr`)
+before running it. The source deliberately requires every initial,
+inter-echo, slab, readout, LIN, PAR, sine, and cosine flow-compensation
+component to remain enabled; partial-FC combinations are rejected.
+
+Only active sine/cosine samples use the 180 T/m/s physical envelope. Wave
+ramps, PE, spoilers, rephasers, and prescribed-M0/M1 FC lobes use the
+63 T/m/s low-PNS envelope. Generated v1.5.1 files are written below
+`evaluation/output/v1.5.1/high_slew_wave_gre/`. Run
+`evaluation/validate_wave_gre_high_slew_cases.m` after generating all six
+case/state combinations; it reloads the files and checks each echo's
+center-line sine M0/M1 as well as the appended calibration tail.
+
+PNS and forbidden-frequency checks are deliberately outside that validator.
+Passing its timing, trajectory, labels, and hardware-envelope checks does not
+make a generated file scanner-safe.
+
 ## Integrated acquisition order
 
 One `.seq` file contains two consecutive acquisitions.
