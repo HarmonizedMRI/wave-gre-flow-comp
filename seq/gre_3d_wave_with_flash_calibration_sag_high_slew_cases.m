@@ -273,7 +273,7 @@ end
 % for both GRE imaging and the appended FLASH calibration.
 if ~exist('centerWaveAroundNowave', 'var') || ...
         isempty(centerWaveAroundNowave)
-    centerWaveAroundNowave = true;
+    centerWaveAroundNowave = false;
 end
 isUseWave_sin = true;                        % y-channel sine wave
 isUseWave_cos = true;                        % x-channel cosine wave

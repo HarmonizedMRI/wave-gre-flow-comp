@@ -49,7 +49,7 @@ The current script enables legacy v1.4.1 output as well as the current format. C
 separate sagittal evaluation source for the coupled C10/A12.732,
 C20/A6.3662, and C25/A5.093 mT/m cases. Set `Ncycles` to 10, 20, or 25 and
 set `centerWaveAroundNowave` to `false` (`sinzero`) or `true` (`sinctr`)
-before running it. The source deliberately requires every initial,
+before running it; the default is `sinzero`. The source deliberately requires every initial,
 inter-echo, slab, readout, LIN, PAR, sine, and cosine flow-compensation
 component to remain enabled; partial-FC combinations are rejected.
 
