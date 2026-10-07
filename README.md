@@ -22,7 +22,8 @@ The repository has two intentionally separate parts:
 │   ├── reconstruction.md
 │   └── troubleshooting.md
 ├── seq/
-│   ├── gre_3d_wave_with_flash_calibration.m
+│   ├── gre_3d_wave_with_flash_calibration_tra.m
+│   ├── gre_3d_wave_with_flash_calibration_sag.m
 │   └── utils/
 ├── recon/
 │   ├── recon_wave_gre_from_twix_integrated_nifti.py
@@ -38,7 +39,8 @@ The repository has two intentionally separate parts:
 Recommended entry points:
 
 ```text
-seq/gre_3d_wave_with_flash_calibration.m
+seq/gre_3d_wave_with_flash_calibration_tra.m
+seq/gre_3d_wave_with_flash_calibration_sag.m
 recon/recon_wave_gre_from_twix_integrated_nifti.py
 ```
 
@@ -160,20 +162,16 @@ Open MATLAB and run:
 
 ```matlab
 cd seq
-gre_3d_wave_with_flash_calibration
+gre_3d_wave_with_flash_calibration_tra  % or gre_3d_wave_with_flash_calibration_sag
 ```
 
-On the first run, enter the requested paths. Machine-specific settings are saved beside the script in:
+Review the machine-specific Pulseq, optional safety-tool, output, and scanner
+`.asc` paths near the beginning of each source. Generated v1.5.1 sequence
+files are written under:
 
 ```text
-seq/gre_flash_path_settings.json
-```
-
-Leaving the output path blank uses MATLAB's current folder. Generated sequence files are written under:
-
-```text
-generated_seq_v141/
-generated_seq_v151/
+evaluation/output/v1.5.1/high_slew_wave_gre_tra/
+evaluation/output/v1.5.1/high_slew_wave_gre_sag/
 ```
 
 See [Sequence generation](docs/sequence.md) for acquisition order, calibration SET layout, geometry, flow compensation, path handling, and output behavior.

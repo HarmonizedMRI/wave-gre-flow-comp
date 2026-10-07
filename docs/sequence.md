@@ -1,65 +1,74 @@
 # Sequence generation
 
-## Entry point
+## Entry points
 
 ```text
-seq/gre_3d_wave_with_flash_calibration.m
+seq/gre_3d_wave_with_flash_calibration_tra.m
+seq/gre_3d_wave_with_flash_calibration_sag.m
 ```
 
 Run from MATLAB:
 
 ```matlab
 cd seq
-gre_3d_wave_with_flash_calibration
+gre_3d_wave_with_flash_calibration_tra  % transverse
+gre_3d_wave_with_flash_calibration_sag  % sagittal
 ```
 
 The sequence code is intentionally kept separate from the Python reconstruction environment. `uv` and `pip` manage only reconstruction dependencies; they do not install MATLAB or Pulseq.
 
 ## Path configuration
 
-The script discovers its own folder, adds `seq/utils/`, and asks for machine-specific paths on first use. The resulting settings are stored locally in:
-
-```text
-seq/gre_flash_path_settings.json
-```
-
-The configuration contains paths for:
+Each entry discovers its own folder and adds `seq/utils/`. Its initial path
+block contains the machine-specific locations for:
 
 - Pulseq
 - optional Safe PNS Prediction code
-- output root
+- the independent evaluation output root
 - optional scanner `.asc` file
 
-The JSON file is ignored by Git because these paths are specific to each workstation. Later runs can reuse or update the saved settings. Leaving the output path blank uses MATLAB's current folder.
+Review that block before running on another workstation. Generated files are
+not written beside MATLAB source files.
 
 ## Output formats
 
-The script can write:
+The parity-aware arbitrary-gradient boundary samples require Pulseq v1.5.x.
+The entries write v1.5.1 files below:
 
 ```text
-generated_seq_v141/   legacy Pulseq v1.4.1 files
-generated_seq_v151/   current Pulseq v1.5.x files
+evaluation/output/v1.5.1/high_slew_wave_gre_tra/
+evaluation/output/v1.5.1/high_slew_wave_gre_sag/
 ```
 
-The current script enables legacy v1.4.1 output as well as the current format. Confirm the format supported by the scanner interpreter before use.
+Legacy v1.4.1 output is disabled because those boundary values do not survive
+a write/read round trip. Confirm v1.5.x support in the scanner interpreter.
 
-## High-slew parity-aware full-FC evaluation entry point
+## High-slew parity-aware full-FC wave cases
 
-`seq/gre_3d_wave_with_flash_calibration_sag_high_slew_cases.m` is the
-separate sagittal evaluation source for the coupled C10/A12.732,
-C20/A6.3662, and C25/A5.093 mT/m cases. Set `Ncycles` to 10, 20, or 25 and
+Both entry points support the coupled C10/A12.732, C20/A6.3662, and
+C25/A5.093 mT/m cases. Set `Ncycles` to 10, 20, or 25 and
 set `centerWaveAroundNowave` to `false` (`sinzero`) or `true` (`sinctr`)
-before running it; the default is `sinzero`. The source deliberately requires every initial,
+before running either source; the default is `sinzero`. Both sources deliberately require every initial,
 inter-echo, slab, readout, LIN, PAR, sine, and cosine flow-compensation
 component to remain enabled; partial-FC combinations are rejected.
+
+The TRA entry treats TE1=10 ms, echo spacing=10 ms, and TR=30 ms as
+minimum timing targets. It applies the smallest raster-exact increase needed
+by the selected full-FC case and either centering state; currently C10 uses
+TE=[10, 20.14] ms while
+C20/C25 retain TE=[10, 20] ms. The emitted values are stored in the sequence
+definitions and checked after reload.
 
 Only active sine/cosine samples use the 180 T/m/s physical envelope. Wave
 ramps, PE, spoilers, rephasers, and prescribed-M0/M1 FC lobes use the
 63 T/m/s low-PNS envelope. Generated v1.5.1 files are written below
-`evaluation/output/v1.5.1/high_slew_wave_gre/`. Run
-`evaluation/validate_wave_gre_high_slew_cases.m` after generating all six
-case/state combinations; it reloads the files and checks each echo's
-center-line sine M0/M1 as well as the appended calibration tail.
+`evaluation/output/v1.5.1/high_slew_wave_gre_tra/` or
+`evaluation/output/v1.5.1/high_slew_wave_gre_sag/`. Run the matching
+`evaluation/validate_wave_gre_tra.m` or `evaluation/validate_wave_gre_sag.m`
+after generating all six case/state combinations; each validator reloads the
+files and checks every echo's center-line sine M0/M1 and the integrated
+calibration contract. The SAG validator additionally matches the appended
+calibration tail against the accepted standalone calibration files.
 
 PNS and forbidden-frequency checks are deliberately outside that validator.
 Passing its timing, trajectory, labels, and hardware-envelope checks does not
@@ -121,7 +130,7 @@ The reconstruction validates this integrated layout against the definitions stor
 
 ## Geometry
 
-The verified implementation uses transverse mapping:
+The transverse entry uses:
 
 ```text
 readout       -> x
@@ -130,7 +139,9 @@ PAR / cosine  -> z
 slab select   -> z
 ```
 
-The GRE reconstruction currently supports this transverse orientation only. Use the exact `.seq` file that was executed for the measurement.
+The sagittal entry uses RO=z, LIN=y/sine, PAR=x/cosine, and slab select=x.
+The GRE reconstruction currently supports the transverse orientation only.
+Use the exact `.seq` file that was executed for the measurement.
 
 The calibration uses the same FOV and slab-selective excitation convention as the GRE acquisition. Its slab rephaser is placed in a standalone block rather than overlapping the following phase-encoding, readout, or wave gradients.
 

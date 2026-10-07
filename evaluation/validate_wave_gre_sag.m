@@ -6,7 +6,7 @@ repoPath = fileparts(evaluationPath);
 addpath(fullfile(repoPath, 'seq', 'utils'));
 
 grePath = fullfile(evaluationPath, 'output', 'v1.5.1', ...
-    'high_slew_wave_gre');
+    'high_slew_wave_gre_sag');
 referenceRoot = '/Users/yiyund/Code_mgh/sources/seq_for_eva';
 calibrationPath = fullfile(referenceRoot, 'outputs', 'flash_calibration', ...
     'v1.5.1', 'high_slew');

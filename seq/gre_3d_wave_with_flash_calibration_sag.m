@@ -1,7 +1,7 @@
-% gre_3d_wave_with_flash_calibration.m
+% gre_3d_wave_with_flash_calibration_sag.m
 % Author: Yiyun Dong
 % Affiliation: Athinoula A. Martinos Center for Biomedical Imaging
-% Date: 2026-07-15
+% Date: 2026-09-21
 %
 % 3D multi-echo wave-encoded GRE with full flow compensation and an
 % integrated slab-selective FLASH wave-calibration acquisition.
@@ -29,8 +29,8 @@
 %   [LIN=72, PAR=72, SET=5]. A typical loader shape is
 %   [Nx_os, Ncoil, 72, 72, 5]; unacquired stripe entries remain zero.
 %
-% Geometry is TRA for both acquisitions:
-%   RO=x, LIN=y/sine, PAR=z/cosine/slab-select.
+% Geometry is SAG for both acquisitions:
+%   RO=z, LIN=y/sine, PAR=x/cosine/slab-select.
 %   GRE and calibration LIN/PAR indices both map from negative to positive
 %   physical k-space as the MATLAB/TWIX array indices increase.
 %
@@ -39,28 +39,25 @@
 %
 % Local helper functions are stored in ./utils/.
 %
-% Do not call clear/clear all here: users may predefine path variables in the
-% MATLAB workspace before running this script.
+% Do not call clear/clear all here: users may predefine Ncycles and
+% centerWaveAroundNowave in the MATLAB workspace before running this script.
 close all; clc
 format long
 
-%% Path
+%% Hard-coded paths
 script_dir = fileparts(mfilename('fullpath'));
-if isempty(script_dir)
-    script_dir = pwd;
-end
+repo_root = fileparts(script_dir);
 utils_path = fullfile(script_dir, 'utils');
 if ~exist(utils_path, 'dir')
     error('Required local utils folder not found: %s', utils_path);
 end
 addpath(utils_path);
 
-% Saved beside this script as gre_flash_path_settings.json.
-pathSettings = configurePathSettings(script_dir);
-pulseq_path = pathSettings.pulseq_path;
-safe_pns_prediction_path = pathSettings.safe_pns_prediction_path;
-out_path = ensureTrailingFilesep(pathSettings.out_path);
-system_asc_file = pathSettings.system_asc_file;
+pulseq_path = '/Users/yiyund/Code_mgh/pulseq';
+safe_pns_prediction_path = '/Users/yiyund/Code_mgh/safe_pns_prediction';
+out_path = fullfile(repo_root, 'evaluation', 'output', 'v1.5.1', ...
+    'high_slew_wave_gre_sag');
+system_asc_file = '/Users/yiyund/Code_mgh/pulseq/matlab/idea/asc/MP_GPA_K2309_2250V_793A_GC99.asc';
 
 pulseq_matlab_path = fullfile(pulseq_path, 'matlab');
 if exist(fullfile(pulseq_matlab_path, '+mr'), 'dir')
@@ -81,14 +78,17 @@ end
 % Write options:
 %   write_v141_format = false  -> write only current format (v1.5.x)
 %   write_v141_format = true   -> also write legacy v1.4.1 format
-write_v141_format = true;
+% Keep this false because the wave-gradient boundary values do not survive a
+% v1.4.1 write/read round trip.
+write_v141_format = false;
 
 % tag_calib = 'test_';
 % tag_calib = 'FCWaveRead_';
 tag_calib = '';
 
 % ------------------------- sequence timing -------------------------
-alpha          = 15;                         % [deg]
+alphaGre       = 15;                         % [deg], image contrast
+alphaCal       = 7;                          % [deg], matched FLASH calibration
 TE             = [10 20] * 1e-3;       % [s]
 % TE             = [20] * 1e-3;       % [s]
 Nechoes        = numel(TE);
@@ -103,8 +103,8 @@ rfTBP          = 20;
 rfApodization  = 0.42;
 
 % Monopolar readout. roDuration is the full oversampled ADC duration:
-%   256 readout points * 4x RO oversampling * 5 us dwell = 5.12 ms.
-% Echo spacing must exceed roDuration plus the x prephaser/flyback/ramp terms.
+%   250 readout points * 4x RO oversampling * 5 us dwell = 5.00 ms.
+% Echo spacing must exceed roDuration plus the RO prephaser/flyback/ramp terms.
 % roDuration     = 5120e-6;                    % [s] (5 us dwell, 195 Hz, os=4, Nx=256)
 roDuration     = 5000e-6;                    % [s] (5 us dwell, 200 Hz, os=4, Nx=250)
 % roDuration     = 3840e-6;                    % [s] (5 us dwell, 195 Hz, os=3, Nx=256)
@@ -112,7 +112,7 @@ roDuration     = 5000e-6;                    % [s] (5 us dwell, 200 Hz, os=4, Nx
 os_factor      = 4;
 gre_ro_spoil   = 2.0;                        % extra readout-spoiler kmax units
 
-% Reference duration for fixed-duration PE/spoiler timing. The split x/cos
+% Reference duration for fixed-duration PE/spoiler timing. The split RO/cos
 % prep module below is minimum-time and no longer forced to TxPre.
 TxPre          = 1.91e-3;  %1.69e-3 for prisma/cimax, 1.91e-3 for skyra;
 TPre           = TxPre;
@@ -120,28 +120,30 @@ TPre           = TxPre;
 % Optional gap between the prep/dephaser module and the readout/wave module.
 % Used for echo 1 and for all echoes when inter-echo FC is disabled. When
 % centered inter-echo FC is enabled, echoes 2+ ignore this user gap and instead
-% center the shared x-flyback/cosine-prewinder/sine-FC module between neighboring
+% center the shared RO-flyback/cosine-prewinder/sine-FC module between neighboring
 % readout gradients.
 prepToReadoutGap = 0;
 
 % ------------------------- flow compensation -------------------------
-% Step 1: for echo 2+, center the common-duration x flyback and cosine
+% Step 1: for echo 2+, center the common-duration RO flyback and cosine
 % prewinder in the gap between neighboring readout gradients.
 % Step 3: optionally add a zero-area y/sine FC lobe in the same centered
 % inter-echo module to cancel the sine readout-wave M1.
 % Step 4: optionally add a zero-area y/sine FC lobe before echo 1.
-% Step 6: optionally redesign the echo-1 x prephaser and z/cosine prewinder
+% Step 6: optionally redesign the echo-1 RO prephaser and PAR/cosine prewinder
 % by preserving their M0 and overlapping a zero-M0 bipolar M1 correction.
-% Step 9b/9c: optionally move y/LIN and z/PAR initial prephasers into
+% Step 9b/9c: optionally move LIN and PAR initial prephasers into
 % the right-edge-aligned initial prep module and merge them with sine/cos FC.
 % Step 9d: optionally replace the ordinary slab rephaser with an M0/M1
-% slab-select FC rephaser glued immediately after gz_ss.
+% slab-select FC rephaser glued immediately after the slab-select gradient.
 % Step 10: optionally add PE-y drift compensation into the inter-echo
 % zero-M0 y FC module. One max-|M1| waveform is designed per inter-echo gap
 % and scaled over PE-y indices so timing remains echo-specific and fixed.
-% Step 11: optionally add PAR-z drift compensation into the inter-echo
-% z/cosine module. Because the cosine module has nonzero M0, one waveform
+% Step 11: optionally add PAR drift compensation into the inter-echo
+% PAR/cosine module. Because the cosine module has nonzero M0, one waveform
 % is designed per echo gap and per PAR-z index with the same timing.
+% This sagittal entry point supports the complete FC path only.
+% Partial-FC combinations are deliberately out of scope.
 isUseFlowComp = true;
 isFCInterEchoReadoutCos = true;
 isFCInterEchoSine = true;
@@ -158,6 +160,12 @@ zeroAreaFCWaveformMode = '6point'; % choices: '6point' (default) or legacy '4poi
 if ~ismember(zeroAreaFCWaveformMode, {'4point', '6point'})
     error('zeroAreaFCWaveformMode must be ''4point'' or ''6point''.');
 end
+assert(isUseFlowComp && isFCInterEchoReadoutCos && ...
+    isFCInterEchoSine && isFCInterEchoPEY && isFCInterEchoPARZ && ...
+    isApplyInterEchoCosEndpointM1Correction && isFCInitialSine && ...
+    isFCInitialReadout && isFCInitialCosine && isFCInitialPEY && ...
+    isFCInitialPARZ && isFCSlabRephZ, ...
+    'This source requires every initial/inter-echo FC component enabled.');
 
 % PE/slab prewinder timing mode before echo 1.
 %   'shortest' : use the shortest common feasible duration for gy/gz PE + slab rephaser.
@@ -169,55 +177,61 @@ gPEPreTimingMode   = 'shortest';   % choices: 'shortest' or 'fixed'
 fixedPEPreDuration = TPre;         % used only when gPEPreTimingMode = 'fixed'
 
 % ------------------------- geometry -------------------------
-slOrientation = 'TRA';                       % Siemens/Pulseq transverse mapping
+% Physical arrays remain [x y z]. Legacy Nx/Ny/Nz variable names below are
+% retained as logical RO/LIN/PAR sizes to avoid rewriting validated FC math.
+slOrientation = 'SAG';
 ax = struct;
-ax.d1 = 'x';                                 % readout
-ax.d2 = 'z';                                 % inner PE / PAR / partition
+ax.d1 = 'z';                                 % readout
+ax.d2 = 'x';                                 % inner PE / PAR / partition
 ax.d3 = 'y';                                 % outer PE / LIN / phase
 ax.n1 = strfind('xyz', ax.d1);
 ax.n2 = strfind('xyz', ax.d2);
 ax.n3 = strfind('xyz', ax.d3);
 
-% target_fov = [220 172 160] * 1e-3;           % [m]
-target_fov = [220 220 160] * 1e-3;           % [m]
-sliceOS    = 0.125;
-
-% Encoded z slab = 160 mm * (1 + 12.5%) = 180 mm, 64*(1+12.5%) = 72.
-% fov = [220 172 180] * 1e-3;                 % encoded FOV [m] (children)
-fov = [220 220 180] * 1e-3;                 % encoded FOV [m] (adults)
+target_fov = [200 240 250] * 1e-3;          % physical [x y z], m
+fov = [200 240 250] * 1e-3;                 % encoded physical [x y z], m
+sliceOS = 0;
 
 % Requested voxel size [x y z], in mm. The matrix N is derived from fov and
 % res, with each dimension rounded to the nearest even integer so that the
 % k-space center index remains well defined for the PE ordering/TI logic.
 % Examples:
-%   For children: 
+%   For children:
 %     res = [0.86  0.9   2.5 ];  % N ~= [256 192 72]
 %     res = [0.86  1.25  2.5 ];  % N ~= [256 138 72]
 %     res = [0.86  1.5   2.5 ];  % N ~= [256 114 72]
-%   For adults: 
+%   For adults:
 %     res = [0.86  0.86  2.5 ];  % N ~= [256 256 72]
 %     res = [0.86  1.25  2.5 ];  % N ~= [256 138 72]
 %     res = [0.86  1.5   2.5 ];  % N ~= [256 114 72]
 %     res = [0.88  0.88  2.5 ];  % N ~= [250 250 72]
 %     res = [0.92  0.92  2.5 ];  % N ~= [240 240 72]
 % res = [0.92 0.92 2.5];          % requested resolution [x y z], in mm
-res = [0.88 0.88 2.5];          % requested resolution [x y z], in mm
+% res = [0.88 0.88 2.5];          % requested resolution [x y z], in mm
+res = [1 1 1];                  % requested resolution [x y z], mm
 N = 2 * round((fov(:).' * 1e3 ./ res) / 2);
 actualRes = fov(:).' ./ N * 1e3; % actual achieved resolution [x y z], in mm
 fprintf('Requested resolution [x y z] = [%.4g %.4g %.4g] mm. Derived N = [%d %d %d]. Actual resolution = [%.4g %.4g %.4g] mm.\n', ...
     res(1), res(2), res(3), N(1), N(2), N(3), actualRes(1), actualRes(2), actualRes(3));
 
-Nx    = N(1);
-Ny    = N(2);
-Nz    = N(3);
+Nx    = N(ax.n1);               % logical RO count = physical Nz = 250
+Ny    = N(ax.n3);               % logical LIN count = physical Ny = 240
+Nz    = N(ax.n2);               % logical PAR count = physical Nx = 200
 Nx_os = Nx * os_factor;
 
-slabExciteThickness = target_fov(3);         % RF excites target slab [m]
-slabEncodeThickness = fov(3);                % PAR encodes oversampled slab [m]
+slabExciteThickness = target_fov(ax.n2);     % RF excites physical x slab [m]
+slabEncodeThickness = fov(ax.n2);            % PAR encodes physical x slab [m]
+
+assert(strcmp(slOrientation, 'SAG'), 'This sequence entry is SAG only.');
+assert(isequal(N, [200 240 250]), 'Physical matrix must be [200 240 250].');
+assert(strcmp(ax.d1, 'z') && strcmp(ax.d2, 'x') && strcmp(ax.d3, 'y'), ...
+    'SAG mapping must be RO=z, PAR=x, LIN=y.');
+assert(Nx == 250 && Ny == 240 && Nz == 200, ...
+    'Logical RO/LIN/PAR sizes must be 250/240/200.');
 
 % ------------------------- acceleration -------------------------
-Ry = 3;                                      % acceleration along y/LIN
-Rz = 1;                                      % acceleration along z/PAR
+Ry = 3;                                      % acceleration along LIN/y
+Rz = 1;                                      % acceleration along PAR/x
 
 % ------------------------- FLASH calibration -------------------------
 % Calibration is appended after the GRE image acquisition and routed to
@@ -232,19 +246,48 @@ calibWaveInfoFlag = false;
 calibWaveDebugFlag = false;
 
 % ------------------------- wave -------------------------
-gwave_max     = 8;                           % [mT/m] (8 for long Tread, 7 for 3000 ms Tread)
 swave_max     = 200;                         % [T/m/s]
-Ncycles       = 10;
+if ~exist('Ncycles', 'var') || isempty(Ncycles)
+    Ncycles = 20;
+end
+switch Ncycles
+    case 10
+        gwave_max = 12.732;                  % [mT/m]
+        gwave_name = '12p732';
+        calibPreDurationFloor = 1.19e-3;      % [s], accepted standalone C10
+    case 20
+        gwave_max = 6.3662;                  % [mT/m]
+        gwave_name = '6p3662';
+        calibPreDurationFloor = 1.01e-3;      % [s], accepted standalone C20
+    case 25
+        gwave_max = 5.093;                   % [mT/m]
+        gwave_name = '5p093';
+        calibPreDurationFloor = 0.96e-3;      % [s], accepted standalone C25
+    otherwise
+        error(['Supported wave cases are Ncycles=10/Gmax=12.732, ', ...
+            'Ncycles=20/Gmax=6.3662, and Ncycles=25/Gmax=5.093 mT/m.']);
+end
+
+% false: force each sine-wave ADC center through its no-wave k-space line.
+% true: center the sine corkscrew around that line. The same state is used
+% for both GRE imaging and the appended FLASH calibration.
+if ~exist('centerWaveAroundNowave', 'var') || ...
+        isempty(centerWaveAroundNowave)
+    centerWaveAroundNowave = false;
+end
 isUseWave_sin = true;                        % y-channel sine wave
-isUseWave_cos = true;                        % z-channel cosine wave
+isUseWave_cos = true;                        % x-channel cosine wave
 % isUseWave_sin = false;                        % y-channel sine wave
 % isUseWave_cos = false;                        % z-channel cosine wave
-waveSinChannel = 'y';
-waveCosChannel = 'z';
+waveSinChannel = ax.d3;
+waveCosChannel = ax.d2;
 
 % Set true for verbose helper-function reports.
 waveInfoFlag = true;
 waveDebugFlag = true;
+
+assert(isUseWave_sin && isUseWave_cos, ...
+    'This source requires both sine and cosine wave axes enabled.');
 
 assert(NdummyCal >= 0 && NdummyCal == round(NdummyCal), ...
     'NdummyCal must be a nonnegative integer.');
@@ -270,23 +313,19 @@ end
 if os_factor ~= round(os_factor) || os_factor < 1
     error('os_factor must be a positive integer.');
 end
-if Nx_os ~= 1024
-    warning('Nx_os = %d, expected 1024 for Nx=256 and os_factor=4.', Nx_os);
-end
-if abs(slabEncodeThickness/slabExciteThickness - (1 + sliceOS)) > 1e-9
-    warning('Encoded/excited slab ratio does not match sliceOS.');
-end
+assert(Nx_os == 1000, 'Expected 250*4 = 1000 ADC samples.');
+assert(abs(slabEncodeThickness/slabExciteThickness - (1 + sliceOS)) <= 1e-9, ...
+    'Encoded/excited slab ratio does not match sliceOS.');
 
 %% System limits
 
-sys_type_options = {'prisma', 'skyra', 'Connectome2', 'C2_simulate_prisma', ...
-    'trio', 'prisma_XA30A', 'premier', 'CimaX', 'TerraX'};
-sys_type = selectStringOption('sys_type', 'Select scanner/system name', ...
-    sys_type_options, 'prisma');
+sys_type = 'skyra';
 slew_safety_magrin        = 0.7;
 grad_safety_magrin        = 0.9;
-lowPNS_slew_safety_margin = 0.41;
+lowPNS_slew_safety_margin = 0.35;
 lowPNS_grad_safety_margin = grad_safety_magrin;
+fc_slew_safety_margin     = 0.35;
+fc_grad_safety_margin     = 0.8;
 diff_slew_safety_margin   = 0.45;
 diff_grad_safety_margin   = 0.97;
 
@@ -356,6 +395,22 @@ sys = mr.opts('MaxGrad',physical_grad_max*grad_safety_magrin,'GradUnit','mT/m',.
     'blockDurationRaster', blockDurationRaster,...
     'B0',B0);
 
+% The sequence-wide envelope represents the physical scanner limit. Only
+% active wave samples are designed against this system; ordinary gradients
+% retain the conservative systems below.
+sys_sequence = mr.opts( ...
+    'MaxGrad', physical_grad_max*grad_safety_magrin, 'GradUnit', 'mT/m', ...
+    'MaxSlew', physical_slew_max, 'SlewUnit', 'T/m/s', ...
+    'rfDeadTime', rfDeadTime, ...
+    'rfRingdownTime', rfRingdownTime, ...
+    'adcDeadTime', adcDeadTime, ...
+    'adcRasterTime', adcRasterTime, ...
+    'rfRasterTime', rfRasterTime, ...
+    'gradRasterTime', gradRasterTime, ...
+    'blockDurationRaster', blockDurationRaster, ...
+    'B0', B0);
+sys_wave = sys_sequence;
+
 sys_lowPNS = mr.opts('MaxGrad',physical_grad_max*lowPNS_grad_safety_margin,'GradUnit','mT/m',...
     'MaxSlew',physical_slew_max*lowPNS_slew_safety_margin,'SlewUnit','T/m/s',...
     'rfDeadtime', rfDeadTime, ...
@@ -367,8 +422,10 @@ sys_lowPNS = mr.opts('MaxGrad',physical_grad_max*lowPNS_grad_safety_margin,'Grad
     'blockDurationRaster', blockDurationRaster,...
     'B0',B0);
 
-sys_lowPNS2 = mr.opts('MaxGrad',physical_grad_max*0.6,'GradUnit','mT/m',...
-    'MaxSlew',physical_slew_max*0.35,'SlewUnit','T/m/s',...
+% Flow-compensation lobes were the PNS-limiting events at 0.45 slew margin.
+% Use the same conservative 0.35 Skyra slew margin as the calibration design.
+sys_lowPNS2 = mr.opts('MaxGrad',physical_grad_max*fc_grad_safety_margin,'GradUnit','mT/m',...
+    'MaxSlew',physical_slew_max*fc_slew_safety_margin,'SlewUnit','T/m/s',...
     'rfDeadtime', rfDeadTime, ...
     'rfRingdownTime', rfRingdownTime, ...
     'adcDeadTime', adcDeadTime,...
@@ -390,16 +447,23 @@ sys_diff = mr.opts('MaxGrad',physical_grad_max*diff_grad_safety_margin,'GradUnit
     'B0',B0);
 
 lims = sys;
-seq = mr.Sequence(sys);
+seq = mr.Sequence(sys_sequence);
 
 %% Setup RF, readout, PE, and ADC
 
-[rf, gz_ss, gz_ssReph] = mr.makeSincPulse(alpha*pi/180, sys_lowPNS, ...
+[rf, gz_ss, gz_ssReph] = mr.makeSincPulse(alphaGre*pi/180, sys_lowPNS, ...
     'Duration', rfDuration, ...
     'SliceThickness', slabExciteThickness, ...
     'apodization', rfApodization, ...
     'timeBwProduct', rfTBP, ...
     'use', 'excitation');
+
+% makeSincPulse returns z-channel gradients; remap slab-select and rephaser
+% to the SAG PAR/slab axis, physical x.
+gz_ss.channel = ax.d2;
+gz_ssReph.channel = ax.d2;
+assert(strcmp(gz_ss.channel, 'x') && strcmp(gz_ssReph.channel, 'x'), ...
+    'SAG image slab-select gradients must use Gx.');
 
 % K-space units are 1/m in Pulseq MATLAB.
 deltak = 1 ./ fov;
@@ -436,7 +500,7 @@ prepToReadoutGap = round(prepToReadoutGap / sys.gradRasterTime) * sys.gradRaster
 % alignment time. If cosine is disabled, fall back to the native x-readout
 % ramp-up time so nowave/sine-only behavior remains natural.
 if isUseWave_cos
-    [G0_cos_timing, ~, ~] = designWaveAmplitude(Tread, sys, Ncycles, ...
+    [G0_cos_timing, ~, ~] = designWaveAmplitude(Tread, sys_wave, Ncycles, ...
         gwave_max, swave_max, physical_slew_max, 'cosine timing preview', false);
     [cosRampUpPreview, nCosRampUp, T_cosRampUp, cosRampUpSlewPeak] = ...
         makeShortestEndpointRampWave(0, G0_cos_timing, sys_lowPNS);
@@ -503,7 +567,7 @@ tReadGradEndForFC   = mr.calcDuration(gxRead);
     tGxRead, aGxRead, 0, t_adc_center, 0);
 readoutInitialFCTargetM1 = -readoutFirstHalfM1;
 
-fprintf(['\nStep 5/6 readout/x initial-FC M1 diagnostic:\n', ...
+fprintf(['\nStep 5/6 RO/z initial-FC M1 diagnostic:\n', ...
          '  reference time = readout/wave module start\n', ...
          '  echo center in readout module          = %.6f ms\n', ...
          '  first-half readout M0                  = %.9g 1/m\n', ...
@@ -517,9 +581,9 @@ gxSpoilArea = gre_ro_spoil * Nx * deltak(ax.n1);
 gxSpoil = mr.makeTrapezoid(ax.d1, 'Area', gxSpoilArea, ...
     'Duration', TPre, 'system', sys_lowPNS);
 
-% PE areas: y/LIN and z/PAR use encoded FOV/matrix.
-phaseAreasY = ((0:Ny-1) - Ny/2) * deltak(2);
-phaseAreasZ = ((0:Nz-1) - Nz/2) * deltak(3);
+% PE areas use logical LIN/y and PAR/x axes from the physical FOV.
+phaseAreasY = ((0:Ny-1) - Ny/2) * deltak(ax.n3);
+phaseAreasZ = ((0:Nz-1) - Nz/2) * deltak(ax.n2);
 
 % Sinc rephaser is played together with z/PAR prewinder before echo 1.
 % The duration can be either the shortest common feasible value or a fixed
@@ -554,18 +618,18 @@ end
 if isUseSlabRephFCPreview
     T0Slab = ceil(mr.calcDuration(gz_ssReph) / sys.gradRasterTime) * sys.gradRasterTime;
     [gzSlabRephNatural, gzSlabFCNaturalInfo] = designMinDurationM0M1LobeRefStart( ...
-        'z', gzSlabRephM0Target, gzSlabRephM1TargetAtStart, T0Slab, sys_lowPNS);
+        ax.d2, gzSlabRephM0Target, gzSlabRephM1TargetAtStart, T0Slab, sys_lowPNS);
     gzSlabRephNaturalDur = ceil(mr.calcDuration(gzSlabRephNatural) / sys.gradRasterTime) * sys.gradRasterTime;
 else
-    gzSlabRephNatural = mr.makeTrapezoid('z', 'Area', gzSlabRephM0Target, ...
+    gzSlabRephNatural = mr.makeTrapezoid(ax.d2, 'Area', gzSlabRephM0Target, ...
         'system', sys_lowPNS);
     gzSlabFCNaturalInfo = struct('active', false);
     gzSlabRephNaturalDur = ceil(mr.calcDuration(gzSlabRephNatural) / sys.gradRasterTime) * sys.gradRasterTime;
 end
 
-gyPreMaxNatural = mr.makeTrapezoid('y', 'Area', max(abs(phaseAreasY(:))), ...
+gyPreMaxNatural = mr.makeTrapezoid(ax.d3, 'Area', max(abs(phaseAreasY(:))), ...
     'system', sys_lowPNS);
-gzPreMaxNatural = mr.makeTrapezoid('z', 'Area', max(abs(phaseAreasZ(:) + gzSlabRephM0Target)), ...
+gzPreMaxNatural = mr.makeTrapezoid(ax.d2, 'Area', max(abs(phaseAreasZ(:) + gzSlabRephM0Target)), ...
     'system', sys_lowPNS);
 
 % If merged initial y/z FC is active, the corresponding PE/PAR prephaser is
@@ -606,19 +670,19 @@ if isUseSlabRephFCPreview
 end
 
 gyPreMaxDurForObj = max(gPEPreDur, ceil(mr.calcDuration(gyPreMaxNatural) / sys.gradRasterTime) * sys.gradRasterTime);
-gyPreMax = mr.makeTrapezoid('y', 'Area', max(abs(phaseAreasY(:))), ...
+gyPreMax = mr.makeTrapezoid(ax.d3, 'Area', max(abs(phaseAreasY(:))), ...
     'Duration', gyPreMaxDurForObj, 'system', sys_lowPNS);
 if isUseInitialPARZFCPreview
     if isUseSlabRephFCPreview
         [gzPreMax, gzSlabFCPreviewInfo] = makeM0M1LobeRefStart( ...
-            'z', gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur, sys_lowPNS);
+            ax.d2, gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur, sys_lowPNS);
     else
-        gzPreMax = mr.makeTrapezoid('z', 'Area', gzSlabRephM0Target, ...
+        gzPreMax = mr.makeTrapezoid(ax.d2, 'Area', gzSlabRephM0Target, ...
             'Duration', gPEPreDur, 'system', sys_lowPNS);
         gzSlabFCPreviewInfo = struct('active', false);
     end
 else
-    gzPreMax = mr.makeTrapezoid('z', 'Area', max(abs(phaseAreasZ(:) + gzSlabRephM0Target)), ...
+    gzPreMax = mr.makeTrapezoid(ax.d2, 'Area', max(abs(phaseAreasZ(:) + gzSlabRephM0Target)), ...
         'Duration', gPEPreDur, 'system', sys_lowPNS);
     gzSlabFCPreviewInfo = struct('active', false);
 end
@@ -626,10 +690,10 @@ fprintf(['PE/slab prephaser timing mode: %s\n', ...
          '  shortest feasible duration = %.6f ms\n', ...
          '  selected common duration   = %.6f ms\n', ...
          '  fixedPEPreDuration input   = %.6f ms\n', ...
-         '  TxPre remains %.6f ms for spoilers/fixed PE timing, but x/cos prep uses min common duration.\n'], ...
+         '  TxPre remains %.6f ms for spoilers/fixed PE timing, but RO/cos prep uses min common duration.\n'], ...
     gPEPreTimingMode, naturalGPEPreDur*1e3, gPEPreDur*1e3, fixedPEPreDuration*1e3, TxPre*1e3);
 if isUseSlabRephFCPreview
-    fprintf(['  Step 9d slab FC active: gz_ss late M0/M1 about rephaser start = %.9g / %.9g; ', ...
+    fprintf(['  Step 9d slab FC active: Gx slab-select late M0/M1 about rephaser start = %.9g / %.9g; ', ...
              'slab target M0/M1 = %.9g / %.9g; slab FC duration = %.6f ms'], ...
         gzSsLateM0, gzSsLateM1AtRephStart, gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur*1e3);
 end
@@ -657,9 +721,9 @@ cosWaveBlockDurMax = readoutModuleDurX;
 for c = 1:Nechoes
     if isUseWave_cos
         debugThis = waveDebugFlag;
-        [gzCosPre{c}, gzWave{c}, waveAreaZ(c), prevCosArea, cosTiming{c}, cosRampUpM1(c)] = defineCosineReadoutWave( ...
+        [gzCosPre{c}, gzWave{c}, waveAreaZ(c), prevCosArea, cosTiming{c}, cosRampUpM1(c)] = defineParityCosineReadoutWave( ...
             waveCosChannel, Tread, T_cosPreTrap, T_wavePrePad, readoutModuleDurX, ...
-            sys, sys_lowPNS, Ncycles, gwave_max, swave_max, physical_slew_max, ...
+            sys_wave, sys_lowPNS, Ncycles, gwave_max, swave_max, physical_slew_max, ...
             adc, c, prevCosArea, waveInfoFlag, debugThis);
         % gzCosPre is rebuilt below with the final common prep duration.
         gzWave{c}.id = seq.registerGradEvent(gzWave{c});
@@ -671,16 +735,50 @@ end
 % region is consistent across y/z waves. If cosine is disabled, this simply
 % falls back to the x-readout module duration.
 waveBlockEnvelopeDur = cosWaveBlockDurMax;
+sineTiming = cell(1, Nechoes);
 for c = 1:Nechoes
     if isUseWave_sin
         debugThis = waveDebugFlag && (c == 1);
-        [gyWave{c}, waveAreaY(c), sineReadM1(c)] = defineSineReadoutWave( ...
+        [gyWave{c}, waveAreaY(c), sineReadM1(c), sineTiming{c}] = ...
+            defineSineReadoutWaveWithMoments( ...
             waveSinChannel, Tread, T_wavePrePad, waveBlockEnvelopeDur, ...
-            sys, Ncycles, gwave_max, swave_max, physical_slew_max, ...
+            sys_wave, Ncycles, gwave_max, swave_max, physical_slew_max, ...
             adc, c, waveInfoFlag && (c == 1), debugThis);
         gyWave{c}.id = seq.registerGradEvent(gyWave{c});
     end
 end
+
+% Sine M0/M1 state at each ADC center. The active waveform never changes
+% with the centering option; only the prep/carry M0 changes.
+sineHeadM0 = zeros(1, Nechoes);
+sineHeadM1AboutEcho = zeros(1, Nechoes);
+sineCenterM0Target = zeros(1, Nechoes);
+sinePrepCarryM0 = zeros(1, Nechoes);
+for c = 1:Nechoes
+    [sineHeadM0(c), sineHeadM1AboutEcho(c)] = ...
+        calcWaveHeadMoments(sineTiming{c}, t_adc_center);
+    if centerWaveAroundNowave
+        if mod(Ncycles, 2) == 0
+            sineCenterM0Target(c) = ...
+                -sineTiming{c}.G0/(2*pi*Ncycles/Tread);
+        else
+            assert(Ncycles == 25, ...
+                'Only the Ncycles=25 odd sine case is supported.');
+            nSineRasterCells = round(Tread/sys.gradRasterTime);
+            sineRawCenterM0Raster = sineTiming{c}.G0 ...
+                *sys.gradRasterTime ...
+                *cot(pi*Ncycles/nSineRasterCells);
+            sineCenterM0Target(c) = 0.5*sineRawCenterM0Raster;
+        end
+    else
+        sineCenterM0Target(c) = 0;
+    end
+    sinePrepCarryM0(c) = sineCenterM0Target(c)-sineHeadM0(c);
+end
+fprintf(['Sine center state: head M0=%+.9g, desired center=%+.9g, ', ...
+    'prep carry=%+.9g 1/m; centered=%d.\n'], ...
+    sineHeadM0(1), sineCenterM0Target(1), sinePrepCarryM0(1), ...
+    centerWaveAroundNowave);
 
 % Optional y-axis FC/prephaser modules.
 %
@@ -711,7 +809,7 @@ isUseInitialReadoutFC = isUseFlowComp && isFCInitialReadout;
 isUseInitialCosineFC = isUseFlowComp && isFCInitialCosine && isUseWave_cos;
 isUseSeparateInitialCosineFC = isUseInitialCosineFC && ~isUseMergedInitialZPreFC;
 isUseAnyInitialXCosFC = isUseInitialReadoutFC || isUseInitialCosineFC || isUseMergedInitialZPreFC;
-gySineFC = cell(1, Nechoes);              % echo-indexed zero-M0 y FC for separate sine/inter-echo use
+gySineFC = cell(1, Nechoes);              % legacy separate-y FC fallback (full FC uses merged per-LIN lobes)
 gyInitialFCByY = cell(1, Ny);             % echo-1 PE-index-dependent y prep/FC objects
 gySineFCNaturalDur = zeros(1, Nechoes);
 gySineFCM0 = zeros(1, Nechoes);
@@ -739,8 +837,8 @@ gyInitialMergedGradPeakByY = zeros(1, Ny);
 gyInitialMergedSlewPeakByY = zeros(1, Ny);
 
 % Step 10 diagnostics/targets for inter-echo PE-y + sine FC.
-gyInterEchoFCByY = cell(Nechoes, Ny);             % c,iy zero-M0 y FC for echoes 2+
-gyInterEchoFCTargetM1ByY = zeros(Nechoes, Ny);   % total target = sine target + PE-y drift target
+gyInterEchoFCByY = cell(Nechoes, Ny);             % c,iy prescribed-M0/M1 y FC for echoes 2+
+gyInterEchoFCTargetM1ByY = zeros(Nechoes, Ny);   % helper-reference target
 gyInterEchoPEYM1TargetByY = zeros(Nechoes, Ny);  % PE-y-only drift target
 gyInterEchoFCScaleByY = zeros(Nechoes, Ny);
 gyInterEchoFCTargetM1MaxByEcho = zeros(1, Nechoes);
@@ -748,6 +846,11 @@ gyInterEchoFCMaxIdxByEcho = ones(1, Nechoes);
 gyInterEchoFCMaxInfoByEcho = cell(1, Nechoes);
 gyInterEchoFCM1ByY = zeros(Nechoes, Ny);
 gyInterEchoFCM0ByY = zeros(Nechoes, Ny);
+gyInterEchoFCM1AboutTEByY = zeros(Nechoes, Ny);
+gyInterEchoM0TargetByEcho = zeros(1, Nechoes);
+gyInterEchoExternalM0ByEcho = zeros(1, Nechoes);
+gyInterEchoExternalM1AboutTEByEcho = zeros(1, Nechoes);
+gyInterEchoFCTargetM1AboutTEByY = zeros(Nechoes, Ny);
 
 % Step 11c: robust initial cosine-head M1 plus Step 11b inter-echo PAR-z + cosine FC.
 % Step 11b diagnostics/targets for inter-echo PAR-z + cosine FC.
@@ -805,7 +908,7 @@ initialCosineFCInfo = struct('active', false);
 initialXCosFCGrowIters = 0;
 
 if isUseInitialSineFC
-    gySineFCTargetM1(1) = -0.5 * sineReadM1(1);
+    gySineFCTargetM1(1) = -sineHeadM1AboutEcho(1);
 end
 
 if isUseMergedInitialYPreFC
@@ -814,7 +917,7 @@ if isUseMergedInitialYPreFC
     % Helper reference is readout-module start. Because M0 is nonzero,
     % convert by adding t_adc_center*M0:
     %   M1_about_readoutStart = M1_about_TE1 + t_adc_center*M0.
-    gyInitialMergedPreM0ByY = phaseAreasY;
+    gyInitialMergedPreM0ByY = phaseAreasY+sinePrepCarryM0(1);
     gyInitialMergedTargetM1AboutTE1ByY = gySineFCTargetM1(1) * ones(1, Ny);
     gyInitialMergedTargetM1ByY = gyInitialMergedTargetM1AboutTE1ByY + t_adc_center * gyInitialMergedPreM0ByY;
     gyInitialFCTargetM1ByY = gyInitialMergedTargetM1ByY;
@@ -892,28 +995,29 @@ if isUseMergedInitialZPreFC
 end
 
 if isUseInterEchoYFC
-    if isUseInterEchoSineFC
-        sineFCTargetM1 = -sineReadM1(1);
-    else
-        sineFCTargetM1 = 0;
-    end
     for c = 2:Nechoes
-        gySineFCTargetM1(c) = sineFCTargetM1;
         esp_c = TE(c) - TE(c-1);
-        if isUseInterEchoPEYFC
-            % If echo c-1 is already FC'ed, the maintained PE zeroth moment
-            % accumulates an additional M1_PE = -M0_PE*ESP at echo c.
-            % The zero-M0 inter-echo y FC lobe therefore targets +M0_PE*ESP.
-            gyInterEchoPEYM1TargetByY(c, :) = phaseAreasY * esp_c;
-        end
-        gyInterEchoFCTargetM1ByY(c, :) = sineFCTargetM1 + gyInterEchoPEYM1TargetByY(c, :);
-        if isUseInterEchoPEYFC
-            [~, gyInterEchoFCMaxIdxByEcho(c)] = max(abs(gyInterEchoFCTargetM1ByY(c, :)));
-            gyInterEchoFCTargetM1MaxByEcho(c) = gyInterEchoFCTargetM1ByY(c, gyInterEchoFCMaxIdxByEcho(c));
-            targetForNatural = gyInterEchoFCTargetM1MaxByEcho(c);
-        else
-            targetForNatural = gySineFCTargetM1(c);
-        end
+        [gyInterEchoExternalM0ByEcho(c), ...
+            gyInterEchoExternalM1AboutTEByEcho(c)] = ...
+            calcInterEchoWaveExternalMoments( ...
+            sineTiming{c-1}, sineTiming{c}, esp_c, t_adc_center);
+        gyInterEchoM0TargetByEcho(c) = ...
+            sineCenterM0Target(c)-sineCenterM0Target(c-1) ...
+            -gyInterEchoExternalM0ByEcho(c);
+        gySineFCTargetM1(c) = ...
+            -gyInterEchoExternalM1AboutTEByEcho(c);
+        gyInterEchoPEYM1TargetByY(c, :) = ...
+            (phaseAreasY+sineCenterM0Target(c-1))*esp_c;
+        gyInterEchoFCTargetM1AboutTEByY(c, :) = ...
+            gySineFCTargetM1(c)+gyInterEchoPEYM1TargetByY(c, :);
+        gyInterEchoFCTargetM1ByY(c, :) = ...
+            gyInterEchoFCTargetM1AboutTEByY(c, :) ...
+            +t_adc_center*gyInterEchoM0TargetByEcho(c);
+        [~, gyInterEchoFCMaxIdxByEcho(c)] = ...
+            max(abs(gyInterEchoFCTargetM1ByY(c, :)));
+        gyInterEchoFCTargetM1MaxByEcho(c) = ...
+            gyInterEchoFCTargetM1ByY(c, gyInterEchoFCMaxIdxByEcho(c));
+        targetForNatural = gyInterEchoFCTargetM1MaxByEcho(c);
         [~, sineFCTimingMin] = makeZeroAreaM1FourPointFC( ...
             waveSinChannel, targetForNatural, NaN, sys_lowPNS2, ...
             'waveformMode', zeroAreaFCWaveformMode);
@@ -943,14 +1047,14 @@ if isUseInterEchoZFC
             % ramp/read-wave joins. Relative to the continuous ideal waveform,
             % this behaves like an extra half-raster area G0*dt/2 whose
             % effective centroid is ESP/2 before the next ADC center. Therefore
-            % the observed residual is -G0*dt*ESP/4 about TE(c), and the H/B
-            % lobe receives the opposite signed correction +G0*dt*ESP/4.
+            % the residual sign follows cosine at ADC center, (-1)^Ncycles.
             %
             % G0 is already in Pulseq units (Hz/m), so do not multiply by gamma.
             if isUseInterEchoCosEndpointM1Correction
                 G0_endpoint = cosTiming{c}.G0;
                 gzInterEchoCosEndpointM1CorrectionByEcho(c) = ...
-                    G0_endpoint * sys.gradRasterTime * esp_c / 4;
+                    cosTiming{c}.centerPolarity*G0_endpoint ...
+                    *sys.gradRasterTime*esp_c/4;
             else
                 gzInterEchoCosEndpointM1CorrectionByEcho(c) = 0;
             end
@@ -1217,13 +1321,17 @@ for c = 1:Nechoes
                 end
 
                 if isUseInterEchoPEYFC
-                    [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gyInterEchoFCTargetM1MaxByEcho(c), Ttry, sys_lowPNS2, ...
-                        'waveformMode', zeroAreaFCWaveformMode);
-                elseif isUseInterEchoSineFC
-                    [gyCandidate, sineFCTiming] = makeZeroAreaM1FourPointFC( ...
-                        waveSinChannel, gySineFCTargetM1(c), Ttry, sys_lowPNS2, ...
-                        'waveformMode', zeroAreaFCWaveformMode);
+                    gyInterCandidateByY = cell(1, Ny);
+                    gyInterInfoByY = cell(1, Ny);
+                    for iyPEFC = 1:Ny
+                        [gyInterCandidateByY{iyPEFC}, ...
+                            gyInterInfoByY{iyPEFC}] = ...
+                            makeM0PreservingM1CorrectedLobe( ...
+                            waveSinChannel, ...
+                            gyInterEchoM0TargetByEcho(c), ...
+                            gyInterEchoFCTargetM1ByY(c, iyPEFC), ...
+                            Ttry, postGapToRefTry, sys_lowPNS2);
+                    end
                 end
 
                 okInterEchoZ = true;
@@ -1258,24 +1366,29 @@ for c = 1:Nechoes
         end
 
         if isUseInterEchoPEYFC
-            gySineFC{c} = gyCandidate;
-            gySineFCM0(c) = sineFCTiming.M0;
-            gySineFCM1(c) = sineFCTiming.M1;
-            gySineFCRampTime(c) = sineFCTiming.r;
-            gySineFCGpeak(c) = sineFCTiming.Gpeak;
-            gySineFCSlewPeak(c) = sineFCTiming.slewPeak;
-            gyInterEchoFCMaxInfoByEcho{c} = sineFCTiming;
-            [gyInterEchoFCByY, gyInterEchoFCScaleByY, gyInterEchoFCM0ByY, gyInterEchoFCM1ByY] = ...
-                fillInterEchoYFCScaledWaveforms(gyInterEchoFCByY, gyInterEchoFCScaleByY, ...
-                    gyInterEchoFCM0ByY, gyInterEchoFCM1ByY, c, gyInterEchoFCTargetM1ByY(c, :), ...
-                    gyInterEchoFCTargetM1MaxByEcho(c), sineFCTiming, waveSinChannel, sys_lowPNS2);
-        elseif isUseInterEchoSineFC
-            gySineFC{c} = gyCandidate;
-            gySineFCM0(c) = sineFCTiming.M0;
-            gySineFCM1(c) = sineFCTiming.M1;
-            gySineFCRampTime(c) = sineFCTiming.r;
-            gySineFCGpeak(c) = sineFCTiming.Gpeak;
-            gySineFCSlewPeak(c) = sineFCTiming.slewPeak;
+            gyInterEchoFCByY(c, :) = gyInterCandidateByY;
+            for iyPEFC = 1:Ny
+                gyInterEchoFCM0ByY(c, iyPEFC) = ...
+                    gyInterInfoByY{iyPEFC}.finalM0;
+                gyInterEchoFCM1ByY(c, iyPEFC) = ...
+                    gyInterInfoByY{iyPEFC}.finalM1;
+                gyInterEchoFCM1AboutTEByY(c, iyPEFC) = ...
+                    gyInterInfoByY{iyPEFC}.finalM1 ...
+                    - t_adc_center*gyInterInfoByY{iyPEFC}.finalM0;
+            end
+            gyInterEchoFCMaxInfoByEcho{c} = ...
+                gyInterInfoByY{gyInterEchoFCMaxIdxByEcho(c)};
+
+            yM0Tolerance = max(1e-9, ...
+                1e-8*max(1, abs(gyInterEchoM0TargetByEcho(c))));
+            yM1Tolerance = max(1e-12, ...
+                1e-8*max(1, max(abs(gyInterEchoFCTargetM1ByY(c, :)))));
+            assert(max(abs(gyInterEchoFCM0ByY(c, :) ...
+                - gyInterEchoM0TargetByEcho(c))) <= yM0Tolerance, ...
+                'Inter-echo y FC M0 target mismatch at echo %d.', c);
+            assert(max(abs(gyInterEchoFCM1ByY(c, :) ...
+                - gyInterEchoFCTargetM1ByY(c, :))) <= yM1Tolerance, ...
+                'Inter-echo y FC helper-reference M1 mismatch at echo %d.', c);
         end
     else
         gxPrep{c} = mr.makeTrapezoid(ax.d1, 'Area', gxPrepArea, ...
@@ -1357,7 +1470,7 @@ for c = 1:Nechoes
         c, gxPrepNaturalDur(c)*1e3, cosPreNaturalDur(c)*1e3, gySineFCNaturalDur(c)*1e3, prepModuleDurTarget(c)*1e3);
 end
 if isUseSeparateInitialSineFC || isUseInterEchoSineFC || isUseInterEchoPEYFC
-    fprintf('\nY FC zero-area %s lobe summary:\n', zeroAreaFCWaveformMode);
+    fprintf('\nY FC lobe summary:\n');
     if isUseSeparateInitialSineFC
         fprintf('  Separate initial echo-1 target from -0.5*sineReadM1(1): %.9g 1/m*s\n', gySineFCTargetM1(1));
         fprintf(['  Echo 1: targetM1=%.9g, achieved M1=%.9g, residual=%.3g, ', ...
@@ -1370,18 +1483,27 @@ if isUseSeparateInitialSineFC || isUseInterEchoSineFC || isUseInterEchoPEYFC
             gySineFCSlewPeak(1)/sys.gamma, 100*gySineFCSlewPeak(1)/sys_lowPNS2.maxSlew);
     end
     if isUseInterEchoPEYFC
-        fprintf('  Inter-echo PE-y Step 10 active. Pure sine base target = %.9g 1/m*s\n', gySineFCTargetM1(2));
+        fprintf(['  Inter-echo PE-y Step 10 active: each LIN uses a ', ...
+            'prescribed-M0/M1 seven-point lobe.\n']);
         for c = 2:Nechoes
-            fprintf(['  Echo %d: total target range=[%.9g %.9g], max-|M1| iy=%d target=%.9g, ', ...
-                     'achieved template M1=%.9g, M0=%.3g, prepDur=%.6f ms, r=%.6f us, ', ...
-                     'flatTop=%.6f us, Gpeak=%.6f kHz/m (%.1f%%), ', ...
-                     'slew=%.6f T/m/s equiv (%.1f%%)\n'], ...
-                c, min(gyInterEchoFCTargetM1ByY(c, :)), max(gyInterEchoFCTargetM1ByY(c, :)), ...
-                gyInterEchoFCMaxIdxByEcho(c), gyInterEchoFCTargetM1MaxByEcho(c), gySineFCM1(c), ...
-                gySineFCM0(c), prepModuleDurTarget(c)*1e3, gySineFCRampTime(c)*1e6, ...
-                max(0, prepModuleDurTarget(c)/2-2*gySineFCRampTime(c))*1e6, ...
-                gySineFCGpeak(c)*1e-3, 100*abs(gySineFCGpeak(c))/sys_lowPNS2.maxGrad, ...
-                gySineFCSlewPeak(c)/sys.gamma, 100*gySineFCSlewPeak(c)/sys_lowPNS2.maxSlew);
+            infoY = gyInterEchoFCMaxInfoByEcho{c};
+            fprintf(['  Echo %d: external M0/M1@TE=%+.9g/%+.9g, ', ...
+                     'lobe M0 target/achieved=%+.9g/%+.9g, ', ...
+                     'M1@TE target range=[%+.9g %+.9g], max residual=', ...
+                     '%.3g, prepDur=%.6f ms, Gpeak=%.6f kHz/m (%.1f%%), ', ...
+                     'slew=%.6f T/m/s (%.1f%%)\n'], ...
+                c, gyInterEchoExternalM0ByEcho(c), ...
+                gyInterEchoExternalM1AboutTEByEcho(c), ...
+                gyInterEchoM0TargetByEcho(c), ...
+                gyInterEchoFCM0ByY(c, gyInterEchoFCMaxIdxByEcho(c)), ...
+                min(gyInterEchoFCTargetM1AboutTEByY(c, :)), ...
+                max(gyInterEchoFCTargetM1AboutTEByY(c, :)), ...
+                max(abs(gyInterEchoFCM1AboutTEByY(c, :) ...
+                    - gyInterEchoFCTargetM1AboutTEByY(c, :))), ...
+                prepModuleDurTarget(c)*1e3, infoY.gradPeak*1e-3, ...
+                100*infoY.gradPeak/sys_lowPNS2.maxGrad, ...
+                infoY.slewPeak/sys.gamma, ...
+                100*infoY.slewPeak/sys_lowPNS2.maxSlew);
         end
     elseif isUseInterEchoSineFC
         fprintf('  Inter-echo target from -sineReadM1(1): %.9g 1/m*s\n', -sineReadM1(1));
@@ -1431,8 +1553,8 @@ if isUseInitialYFC
 end
 
 if isUseInitialZFC
-    fprintf('\nInitial z/PAR + cosine merged FC Step 9c summary:\n');
-    fprintf('  active PAR-z merged prephaser FC=%d, active cosine initial FC=%d\n', ...
+    fprintf('\nInitial PAR/x + cosine merged FC Step 9c summary:\n');
+    fprintf('  active PAR/x merged prephaser FC=%d, active cosine initial FC=%d\n', ...
         isUseMergedInitialZPreFC, isUseInitialCosineFC);
     fprintf('  merged cosine M0 contribution = %.9g 1/m\n', gzInitialMergedCosM0);
     fprintf('  actual cosine head M0 through TE1 = %.9g 1/m\n', gzInitialCosHeadM0);
@@ -1469,7 +1591,7 @@ if isUseAnyInitialXCosFC
     fprintf('  common initial prep duration = %.6f ms (grew by %d x 4-raster steps)\n', ...
         prepModuleDurTarget(1)*1e3, initialXCosFCGrowIters);
     if isUseInitialReadoutFC
-        fprintf(['  x/readout: M0 target/actual = %.9g / %.9g 1/m, ', ...
+        fprintf(['  RO/z readout: M0 target/actual = %.9g / %.9g 1/m, ', ...
                  'M1 target/base/add/final = %.9g / %.9g / %.9g / %.9g 1/m*s, ', ...
                  'H=%.6f kHz/m, B=%.6f kHz/m, Gpk=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
             initialReadoutFCInfo.areaTarget, initialReadoutFCInfo.finalM0, ...
@@ -1479,7 +1601,7 @@ if isUseAnyInitialXCosFC
             initialReadoutFCInfo.gradPeak*1e-3, initialReadoutFCInfo.slewPeak/sys.gamma);
     end
     if isUseSeparateInitialCosineFC
-        fprintf(['  z/cosine separate pre: M0 target/actual = %.9g / %.9g 1/m, ' ...
+        fprintf(['  PAR/x cosine separate pre: M0 target/actual = %.9g / %.9g 1/m, ' ...
                  'M1 target/base/add/final = %.9g / %.9g / %.9g / %.9g 1/m*s, ', ...
                  'H=%.6f kHz/m, B=%.6f kHz/m, Gpk=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
             initialCosineFCInfo.areaTarget, initialCosineFCInfo.finalM0, ...
@@ -1490,37 +1612,37 @@ if isUseAnyInitialXCosFC
     end
 end
 
-% Use the realized Pulseq object areas, not analytic/manual area accounting.
-% This includes rasterization, endpoint samples, pre-blip shape, and the
-% slew-safe post-ramp exactly as written into the sequence.
-waveCarryY = sum(waveAreaY);
+% The inter-echo y modules explicitly transfer the sine M0 state between
+% echoes. After the final full sine body, only its prep state plus the last
+% realized wave area remains for the TR-end rewinder.
+waveCarryY = sinePrepCarryM0(end)+waveAreaY(end);
 waveCarryZ = sum(waveAreaZ);
 
 fprintf('\nWave carry-area summary after %d echoes:\n', Nechoes);
 fprintf('  y/sine total area   = %.9g 1/m\n', waveCarryY);
-fprintf('  z/cosine total area = %.9g 1/m\n', waveCarryZ);
+fprintf('  PAR/x cosine total area = %.9g 1/m\n', waveCarryZ);
 if isUseWave_sin
     fprintf('  y/sine readout-wave M1 only, echo 1 = %.9g 1/m*s\n', sineReadM1(1));
     fprintf('  y/sine readout-wave M1 only, all echoes = %s 1/m*s\n', mat2str(sineReadM1, 9));
 end
 if isUseWave_cos
-    fprintf('  z/cos ramp-up M1 diagnostic only, echo 1 = %.9g 1/m*s\n', cosRampUpM1(1));
-    fprintf('  z/cos ramp-up M1 diagnostic only, all echoes = %s 1/m*s\n', mat2str(cosRampUpM1, 9));
+    fprintf('  PAR/x cosine ramp-up M1 diagnostic only, echo 1 = %.9g 1/m*s\n', cosRampUpM1(1));
+    fprintf('  PAR/x cosine ramp-up M1 diagnostic only, all echoes = %s 1/m*s\n', mat2str(cosRampUpM1, 9));
     fprintf('  actual initial cosine-head M0 through TE1 = %.9g 1/m\n', gzInitialCosHeadM0);
     fprintf('  actual initial cosine-head M1 about TE1 = %.9g 1/m*s\n', ...
         gzInitialCosHeadM1AboutTE1);
     fprintf('  robust initial cosine-FC helper-ref target M1 = %.9g 1/m*s\n', ...
         cosInitialFCTargetM1);
 end
-fprintf('  x-readout module duration      = %.6f ms\n', readoutModuleDurX*1e3);
+fprintf('  RO/z readout module duration   = %.6f ms\n', readoutModuleDurX*1e3);
 fprintf('  cosine-derived wave envelope   = %.6f ms\n', waveBlockEnvelopeDur*1e3);
 
 % Worst-case rewinders now include the accumulated wave area in that axis.
 gyPostMaxArea = max(abs(-phaseAreasY(:) - waveCarryY));
 gzPostMaxArea = max(abs(-phaseAreasZ(:) - waveCarryZ));
-gyPostMax = mr.makeTrapezoid('y', 'Area', gyPostMaxArea, ...
+gyPostMax = mr.makeTrapezoid(ax.d3, 'Area', gyPostMaxArea, ...
     'Duration', TPre, 'system', sys_lowPNS);
-gzPostMax = mr.makeTrapezoid('z', 'Area', gzPostMaxArea, ...
+gzPostMax = mr.makeTrapezoid(ax.d2, 'Area', gzPostMaxArea, ...
     'Duration', TPre, 'system', sys_lowPNS);
 
 %% PE table: accelerated GRE image only
@@ -1529,8 +1651,16 @@ imageYIdx = makeAcceleratedIndexList(Ny, Ry);
 imageZIdx = makeAcceleratedIndexList(Nz, Rz);
 nImagePE = numel(imageYIdx) * numel(imageZIdx);
 
+assert(all(diff(phaseAreasY) > 0) && all(diff(phaseAreasZ) > 0), ...
+    'Image LIN/PAR target areas must increase negative-to-positive.');
+assert(all(diff(imageYIdx) > 0) && all(diff(imageZIdx) > 0), ...
+    'Image LIN/PAR acquisition index lists must be strictly increasing.');
+assert(ismember(floor(Ny/2)+1, imageYIdx) && ...
+    ismember(floor(Nz/2)+1, imageZIdx), ...
+    'Accelerated image sampling must include both k-space center indices.');
+
 fprintf('\nGRE PE table:\n');
-fprintf('  Image: %d y/LIN x %d z/PAR = %d PE positions\n', ...
+fprintf('  Image: %d y/LIN x %d x/PAR = %d PE positions\n', ...
     numel(imageYIdx), numel(imageZIdx), nImagePE);
 fprintf('  Readouts: %d PE positions x %d echoes x %d averages = %d\n', ...
     nImagePE, Nechoes, naverage, nImagePE*Nechoes*naverage);
@@ -1709,14 +1839,14 @@ fprintf('  prepToReadoutGap input=%.6f ms, inter-echo centered FC=%d, sine FC in
 fprintf('  readout gradient start/end in module = %.6f / %.6f ms\n', ...
     tReadGradStart*1e3, tReadGradEnd*1e3);
 fprintf('  adc.delay=%.6f ms, adc center in readout module=%.6f ms\n', adc.delay*1e3, t_adc_center*1e3);
-fprintf('  x readout module duration = %.6f ms; requested inter-echo spacings = %s ms\n', ...
+fprintf('  RO/z readout module duration = %.6f ms; requested inter-echo spacings = %s ms\n', ...
     readoutModuleDurX*1e3, mat2str(diff(TE)*1e3));
 for c = 1:Nechoes
     fprintf('  Echo %d: prepModuleDur=%.6f ms, readoutBlockDur=%.6f ms, delayTE=%.6f ms, postPrepGap=%.6f ms, TE_target=%.6f ms, TE_actual=%.6f ms, err=%.3f us\n', ...
         c, prepModuleDur(c)*1e3, readoutBlockDur(c)*1e3, delayTE(c)*1e3, prepToReadoutGapEcho(c)*1e3, TE(c)*1e3, TE_actual(c)*1e3, (TE_actual(c)-TE(c))*1e6);
 end
 if isUseInterEchoCenteredFC
-    fprintf('\nInter-echo centered FC placement relative to x readout-gradient support:\n');
+    fprintf('\nInter-echo centered FC placement relative to RO/z gradient support:\n');
     for c = 2:Nechoes
         fprintf(['  Echo %d: ESP=%.6f ms, readoutGradGap=%.6f ms, prepDur=%.6f ms, ', ...
                  'gapBefore=%.6f ms, gapAfter=%.6f ms, centerErr=%.3f us, ', ...
@@ -1744,9 +1874,9 @@ gyPost = cell(1, Ny);
 % post-RF prephaser block duration.
 gyPreDurForObj = max(gPEPreDur, ceil(mr.calcDuration(gyPreMaxNatural) / sys.gradRasterTime) * sys.gradRasterTime);
 for iy = 1:Ny
-    gyPre{iy} = mr.makeTrapezoid('y', 'Area', phaseAreasY(iy), ...
+    gyPre{iy} = mr.makeTrapezoid(ax.d3, 'Area', phaseAreasY(iy), ...
         'Duration', gyPreDurForObj, 'system', sys_lowPNS);
-    gyPost{iy} = mr.makeTrapezoid('y', 'Area', -phaseAreasY(iy) - waveCarryY, ...
+    gyPost{iy} = mr.makeTrapezoid(ax.d3, 'Area', -phaseAreasY(iy) - waveCarryY, ...
         'Duration', TPre, 'system', sys_lowPNS);
     gyPre{iy}.id = seq.registerGradEvent(gyPre{iy});
     gyPost{iy}.id = seq.registerGradEvent(gyPost{iy});
@@ -1754,9 +1884,9 @@ end
 
 if isUseSlabRephFC
     [gzSlabReph, gzSlabFCInfo] = makeM0M1LobeRefStart( ...
-        'z', gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur, sys_lowPNS);
+        ax.d2, gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur, sys_lowPNS);
 else
-    gzSlabReph = mr.makeTrapezoid('z', 'Area', gzSlabRephM0Target, ...
+    gzSlabReph = mr.makeTrapezoid(ax.d2, 'Area', gzSlabRephM0Target, ...
         'Duration', gPEPreDur, 'system', sys_lowPNS);
     gzSlabFCInfo = struct('active', false, 'T', gPEPreDur, ...
         'areaTarget', gzSlabRephM0Target, 'targetM1', gzSlabRephM1TargetAtStart);
@@ -1767,25 +1897,25 @@ gzPreComb = cell(1, Nz);    % legacy/fallback: slab rephaser + z/PAR prephaser
 gzParPre = cell(1, Nz);     % separated z/PAR prephaser only, used for diagnostics/fallback clarity
 gzPost = cell(1, Nz);
 for iz = 1:Nz
-    gzParPreNatural = mr.makeTrapezoid('z', 'Area', phaseAreasZ(iz), ...
+    gzParPreNatural = mr.makeTrapezoid(ax.d2, 'Area', phaseAreasZ(iz), ...
         'system', sys_lowPNS);
     gzParPreDurForObj = max(gPEPreDur, ...
         ceil(mr.calcDuration(gzParPreNatural) / sys.gradRasterTime) * sys.gradRasterTime);
-    gzParPre{iz} = mr.makeTrapezoid('z', 'Area', phaseAreasZ(iz), ...
+    gzParPre{iz} = mr.makeTrapezoid(ax.d2, 'Area', phaseAreasZ(iz), ...
         'Duration', gzParPreDurForObj, 'system', sys_lowPNS);
 
     if ~isUseMergedInitialZPreFC
-        gzPreCombNatural = mr.makeTrapezoid('z', 'Area', phaseAreasZ(iz) + gzSlabRephM0Target, ...
+        gzPreCombNatural = mr.makeTrapezoid(ax.d2, 'Area', phaseAreasZ(iz) + gzSlabRephM0Target, ...
             'system', sys_lowPNS);
         gzPreCombDurForObj = max(gPEPreDur, ...
             ceil(mr.calcDuration(gzPreCombNatural) / sys.gradRasterTime) * sys.gradRasterTime);
-        gzPreComb{iz} = mr.makeTrapezoid('z', 'Area', phaseAreasZ(iz) + gzSlabRephM0Target, ...
+        gzPreComb{iz} = mr.makeTrapezoid(ax.d2, 'Area', phaseAreasZ(iz) + gzSlabRephM0Target, ...
             'Duration', gzPreCombDurForObj, 'system', sys_lowPNS);
     else
         gzPreComb{iz} = [];
     end
 
-    gzPost{iz} = mr.makeTrapezoid('z', 'Area', -phaseAreasZ(iz) - waveCarryZ, ...
+    gzPost{iz} = mr.makeTrapezoid(ax.d2, 'Area', -phaseAreasZ(iz) - waveCarryZ, ...
         'Duration', TPre, 'system', sys_lowPNS);
     gzParPre{iz}.id = seq.registerGradEvent(gzParPre{iz});
     if ~isempty(gzPreComb{iz})
@@ -1941,15 +2071,19 @@ MODE_SIN    = 2;
 MODE_COS    = 3;
 calibModeNames = {'nowave', 'sin', 'cos'};
 
-% Calibration uses the shared TRA geometry and readout settings, but keeps a
-% separate readout spoiler value. The RF pulse is slab-selective and matches
-% the GRE excitation geometry.
-[rfCal, gzCalSs, gzCalSsReph] = mr.makeSincPulse(alpha*pi/180, sys_lowPNS, ...
+% Calibration uses the shared SAG geometry and readout settings, but keeps a
+% separate readout spoiler value and the Wave-MPRAGE FLASH flip angle.
+[rfCal, gzCalSs, gzCalSsReph] = mr.makeSincPulse(alphaCal*pi/180, sys_lowPNS, ...
     'Duration', rfDuration, ...
     'SliceThickness', slabExciteThickness, ...
     'apodization', rfApodization, ...
     'timeBwProduct', rfTBP, ...
     'use', 'excitation');
+
+gzCalSs.channel = ax.d2;
+gzCalSsReph.channel = ax.d2;
+assert(strcmp(gzCalSs.channel, 'x') && strcmp(gzCalSsReph.channel, 'x'), ...
+    'SAG calibration slab-select gradients must use Gx.');
 
 calibDwell = dwell;
 calibTread = calibDwell * Nx_os;
@@ -2000,7 +2134,61 @@ end
 
 calibPreDur = max([mr.calcDuration(groCalPre), ...
     mr.calcDuration(gpeCalParMax), mr.calcDuration(gpeCalLinMax)]);
+% Preserve the accepted standalone high-slew calibration timing exactly.
+% The fixed-endpoint feasibility test can otherwise accept one raster
+% earlier because of floating-point comparisons at the slew boundary.
+calibPreDur = max(calibPreDur, calibPreDurationFloor);
 calibPreDur = ceil(calibPreDur/sys.gradRasterTime)*sys.gradRasterTime;
+
+[calibG0, calibOmega, calibTreadRaster] = designWaveAmplitude( ...
+    calibTread, sys_wave, Ncycles, gwave_max, swave_max, ...
+    physical_slew_max, 'calibration timing', false);
+calibRasterCells = round(calibTreadRaster/sys.gradRasterTime);
+if mod(Ncycles, 2) == 0
+    calibSineRawCenterM0 = 0;
+    calibSineRadius = calibG0/calibOmega;
+else
+    calibSineRawCenterM0 = calibG0*sys.gradRasterTime ...
+        *cot(pi*Ncycles/calibRasterCells);
+    calibSineRadius = 0.5*calibSineRawCenterM0;
+end
+if centerWaveAroundNowave
+    calibSinePreOffsetArea = -calibSineRadius;
+else
+    calibSinePreOffsetArea = -calibSineRawCenterM0;
+end
+calibCosCenterPolarity = (-1)^Ncycles;
+calibCosSampleCorrection = ...
+    calibCosCenterPolarity*calibG0*adcCal.dwell/2;
+
+calibPreFound = false;
+for durationIteration = 1:1000
+    trialPreDur = calibPreDur+(durationIteration-1)*sys.gradRasterTime;
+    try
+        mr.makeTrapezoid(ax.d3, 'Area', ...
+            max(abs(calibLinAreas+calibSinePreOffsetArea)), ...
+            'Duration', trialPreDur, 'system', sys_lowPNS);
+        % Test every PAR target. Fixed-duration endpoint-ramp feasibility is
+        % not monotone in target area, so the two extrema are insufficient.
+        cosTrialAreas = calibParAreas-calibCosSampleCorrection;
+        for cosTrialIndex = 1:numel(cosTrialAreas)
+            makeFixedDurationPreRamp4Calib(ax.d2, ...
+                cosTrialAreas(cosTrialIndex), calibG0, ...
+                trialPreDur+groCal.riseTime, sys_lowPNS);
+        end
+        calibPreDur = trialPreDur;
+        calibPreFound = true;
+        break;
+    catch
+    end
+end
+assert(calibPreFound, ...
+    'Could not find a common low-PNS calibration pre-duration.');
+fprintf(['Calibration high-slew prep: duration=%.6f ms, sine raw/radius=', ...
+    '%+.9g/%+.9g 1/m, pre offset=%+.9g, cos polarity=%+d.\n'], ...
+    calibPreDur*1e3, calibSineRawCenterM0, calibSineRadius, ...
+    calibSinePreOffsetArea, calibCosCenterPolarity);
+
 groCalPre = mr.makeTrapezoid(ax.d1, 'Area', groCalPre.area, ...
     'Duration', calibPreDur, 'system', sys_lowPNS);
 gpeCalParPreMax = mr.makeTrapezoid(ax.d2, 'Area', gpeCalParMax.area, ...
@@ -2029,7 +2217,7 @@ gpeCalLinPre_sin     = cell(1, N(ax.n3));
 gpeCalLinPost_sin    = cell(1, N(ax.n3));
 calibPostDurations = mr.calcDuration(groCalSp);
 
-% TRA mapping: PAR/z carries cosine; LIN/y carries sine.
+% SAG mapping: PAR/x carries cosine; LIN/y carries sine.
 for izCal = 1:N(ax.n2)
     gpePreNow = mr.scaleGrad(gpeCalParPreMax, calibParScales(izCal));
     gpeCalParPre_nowave{izCal} = gpePreNow;
@@ -2040,11 +2228,11 @@ for izCal = 1:N(ax.n2)
     assert(abs(gpeCalParPost_nowave{izCal}.area + calibParAreas(izCal)) <= calibAreaTol, ...
         'Calibration PAR rewinder area mismatch at index %d.', izCal);
 
-    debugThis = calibWaveDebugFlag && (izCal == 1);
     [gpeCalParPre_cos{izCal}, gpeCalParPost_cos{izCal}] = ...
-        defineCosineWaveGradient4Calib(calibTread, sys, sys_lowPNS, ...
+        defineParityCosineWaveGradient4Calib( ...
+            calibTread, sys_wave, sys_lowPNS, ...
             Ncycles, gwave_max, swave_max, gpePreNow, groCal, adcCal, ...
-            physical_slew_max, calibWaveInfoFlag && (izCal == 1), debugThis);
+            physical_slew_max);
 
     gpeCalParPre_nowave{izCal}.id = seq.registerGradEvent(gpeCalParPre_nowave{izCal});
     gpeCalParPost_nowave{izCal}.id = seq.registerGradEvent(gpeCalParPost_nowave{izCal});
@@ -2054,6 +2242,10 @@ for izCal = 1:N(ax.n2)
         mr.calcDuration(gpeCalParPost_nowave{izCal}), ...
         mr.calcDuration(gpeCalParPost_cos{izCal})]; %#ok<SAGROW>
 end
+
+calibCenterParIndex = floor(N(ax.n2)/2)+1;
+calibCosRampDownDuration = ...
+    mr.calcDuration(gpeCalParPost_cos{calibCenterParIndex});
 
 for iyCal = 1:N(ax.n3)
     gpePreNow = mr.scaleGrad(gpeCalLinPreMax, calibLinScales(iyCal));
@@ -2065,11 +2257,12 @@ for iyCal = 1:N(ax.n3)
     assert(abs(gpeCalLinPost_nowave{iyCal}.area + calibLinAreas(iyCal)) <= calibAreaTol, ...
         'Calibration LIN rewinder area mismatch at index %d.', iyCal);
 
-    debugThis = calibWaveDebugFlag && (iyCal == 1);
     [gpeCalLinPre_sin{iyCal}, gpeCalLinPost_sin{iyCal}] = ...
-        defineSineWaveGradient4Calib(calibTread, sys, sys_lowPNS, ...
-            Ncycles, gwave_max, swave_max, gpePreNow, groCal, adcCal, ...
-            physical_slew_max, calibWaveInfoFlag && (iyCal == 1), debugThis);
+        defineCenteredSineWaveGradient4Calib( ...
+            calibTread, sys_wave, sys_lowPNS, ...
+            Ncycles, gwave_max, swave_max, gpePreNow, ...
+            calibSinePreOffsetArea, groCal, adcCal, ...
+            calibCosRampDownDuration, physical_slew_max);
 
     gpeCalLinPre_nowave{iyCal}.id = seq.registerGradEvent(gpeCalLinPre_nowave{iyCal});
     gpeCalLinPost_nowave{iyCal}.id = seq.registerGradEvent(gpeCalLinPost_nowave{iyCal});
@@ -2121,7 +2314,7 @@ assert(all(diff(calibLinAreas(kyCalAcs)) > 0), ...
 assert(all(diff(calibParAreas(kzCalAcs)) > 0), ...
     'Calibration ACS PAR block is not ordered negative-to-positive.');
 fprintf(['Calibration PE ordering: negative-to-positive for both LIN/y and ', ...
-    'PAR/z; compact local labels increase with physical k-space.\n']);
+    'PAR/x; compact local labels increase with physical k-space.\n']);
 
 calParts = struct('id', {}, 'name', {}, 'mode', {}, ...
     'kyList', {}, 'kzList', {}, 'isACS', {});
@@ -2346,26 +2539,39 @@ else
     fprintf('Timing check failed! Error listing follows:\n');
     fprintf([error_report{:}]);
     fprintf('\n');
+    error('Sequence timing validation failed.');
 end
 
 %% Concise sequence definitions and write
 seq.setDefinition('FOV', fov);
 seq.setDefinition('TargetFOV', target_fov);
-seq.setDefinition('Nx', Nx);
-seq.setDefinition('Ny', Ny);
-seq.setDefinition('Nz', Nz);
+seq.setDefinition('Nx', N(1));
+seq.setDefinition('Ny', N(2));
+seq.setDefinition('Nz', N(3));
 seq.setDefinition('Nx_os', Nx_os);
 seq.setDefinition('OrientationMapping', slOrientation);
-seq.setDefinition('SliceThickness', slabExciteThickness);
+seq.setDefinition('ReadoutAxis', ax.d1);
+seq.setDefinition('InnerPEAxis', ax.d2);
+seq.setDefinition('OuterPEAxis', ax.d3);
+seq.setDefinition('ReadoutPoints', Nx);
+seq.setDefinition('ReadoutSamples', Nx_os);
+seq.setDefinition('LogicalLINPoints', Ny);
+seq.setDefinition('LogicalPARPoints', Nz);
+seq.setDefinition('SliceThickness', fov(ax.n2)/Nz);
+seq.setDefinition('SlabExciteThickness', slabExciteThickness);
 seq.setDefinition('EncodedSlabThickness', slabEncodeThickness);
 seq.setDefinition('SliceOversampling', sliceOS);
-seq.setDefinition('FlipAngle', alpha);
+seq.setDefinition('FlipAngle', alphaGre);
+seq.setDefinition('ImageFlipAngle', alphaGre);
+seq.setDefinition('CalibrationFlipAngle', alphaCal);
 seq.setDefinition('TE', TE);
 seq.setDefinition('TR', TR);
 seq.setDefinition('Nechoes', Nechoes);
 seq.setDefinition('Averages', naverage);
 seq.setDefinition('Ry', Ry);
 seq.setDefinition('Rz', Rz);
+seq.setDefinition('Rlin', Ry);
+seq.setDefinition('Rpar', Rz);
 seq.setDefinition('Ny_meas', numel(imageYIdx));
 seq.setDefinition('Nz_meas', numel(imageZIdx));
 seq.setDefinition('ReadoutOversamplingFactor', os_factor);
@@ -2373,15 +2579,29 @@ seq.setDefinition('ReadoutDuration', Tread);
 seq.setDefinition('ReadoutPolarity', 'monopolar');
 seq.setDefinition('kSpaceCenterLine', floor(Ny/2));
 seq.setDefinition('kSpaceCenterPartition', floor(Nz/2));
-seq.setDefinition('PhaseResolution', (fov(1)/Nx)/(fov(2)/Ny));
-seq.setDefinition('PartitionResolution', (fov(1)/Nx)/(fov(3)/Nz));
+seq.setDefinition('PhaseResolution', ...
+    (fov(ax.n1)/Nx)/(fov(ax.n3)/Ny));
+seq.setDefinition('PartitionResolution', ...
+    (fov(ax.n1)/Nx)/(fov(ax.n2)/Nz));
 seq.setDefinition('ReceiverGainHigh', 1);
 seq.setDefinition('WaveSinChannel', waveSinChannel);
 seq.setDefinition('WaveCosChannel', waveCosChannel);
 seq.setDefinition('WaveAmplitude_mTm', gwave_max);
 seq.setDefinition('WaveSlew_Tms', swave_max);
 seq.setDefinition('WaveCycles', Ncycles);
+seq.setDefinition('WaveCenteredOnNowave', double(centerWaveAroundNowave));
+seq.setDefinition('WaveSinHeadM0_1pm', sineHeadM0(1));
+seq.setDefinition('WaveSinCenterTarget_1pm', sineCenterM0Target(1));
+seq.setDefinition('WaveSinPrepCarryM0_1pm', sinePrepCarryM0(1));
+seq.setDefinition('WaveCosCenterPolarity', (-1)^Ncycles);
+seq.setDefinition('ActiveWaveSlewLimit_Tms', physical_slew_max);
+seq.setDefinition('WaveRampSlewLimit_Tms', ...
+    physical_slew_max*lowPNS_slew_safety_margin);
+seq.setDefinition('NonWaveSlewLimit_Tms', ...
+    physical_slew_max*lowPNS_slew_safety_margin);
 seq.setDefinition('UseFlowComp', double(isUseFlowComp));
+seq.setDefinition('FlowCompGradSafetyMargin', fc_grad_safety_margin);
+seq.setDefinition('FlowCompSlewSafetyMargin', fc_slew_safety_margin);
 seq.setDefinition('ZeroAreaFCWaveformMode', zeroAreaFCWaveformMode);
 seq.setDefinition('UseFullInitialFC', double(isFCInitialSine && isFCInitialReadout && ...
     isFCInitialCosine && isFCInitialPEY && isFCInitialPARZ && isFCSlabRephZ));
@@ -2390,24 +2610,51 @@ seq.setDefinition('UseFullInterEchoFC', double(Nechoes > 1 && ...
     isFCInterEchoPEY && isFCInterEchoPARZ));
 seq.setDefinition('CalibrationTE', calibTE);
 seq.setDefinition('CalibrationTR', calibTR);
+seq.setDefinition('CalibrationRFType', 'slab_selective_sinc');
+seq.setDefinition('CalibrationRFDuration', rfDuration);
+seq.setDefinition('CalibrationRFTBW', rfTBP);
+seq.setDefinition('CalibrationRFApodization', rfApodization);
+seq.setDefinition('CalibrationSlabAxis', ax.d2);
+seq.setDefinition('CalibrationSlabThickness', slabExciteThickness);
+seq.setDefinition('CalibrationReadoutAxis', ax.d1);
+seq.setDefinition('CalibrationWaveSinAxis', ax.d3);
+seq.setDefinition('CalibrationWaveCosAxis', ax.d2);
+seq.setDefinition('CalibrationReadoutSamples', Nx_os);
+seq.setDefinition('CalibrationReadoutDuration', calibTread);
+seq.setDefinition('CalibrationWaveAmplitude_mTm', gwave_max);
+seq.setDefinition('CalibrationWaveSlew_Tms', swave_max);
+seq.setDefinition('CalibrationWaveCycles', Ncycles);
+seq.setDefinition('CalibrationWaveCenteredOnNowave', ...
+    double(centerWaveAroundNowave));
+seq.setDefinition('CalibrationWaveSinRawCenterMoment_1pm', ...
+    calibSineRawCenterM0);
+seq.setDefinition('CalibrationWaveSinRasterKRadius_1pm', ...
+    calibSineRadius);
+seq.setDefinition('CalibrationWaveSinPreOffsetArea_1pm', ...
+    calibSinePreOffsetArea);
+seq.setDefinition('CalibrationNdummy', NdummyCal);
+seq.setDefinition('CalibrationNsettlePerPart', NsettlePerPart);
 seq.setDefinition('CalibrationNcalib1', Ncalib1);
 seq.setDefinition('CalibrationNcalib2', Ncalib2);
 seq.setDefinition('CalibrationNacs', NacsCal);
 seq.setDefinition('CalibrationNSets', numel(calParts));
+seq.setDefinition('CalibrationRefscanADCs', nCalReadoutsExpected);
 seq.setDefinition('CalibrationRefscanNLin', Ncalib1);
 seq.setDefinition('CalibrationRefscanNPar', Ncalib1);
 seq.setDefinition('CalibrationAllSetsInRefscan', 1);
 seq.setDefinition('CalibrationACSSetID', 4);
 seq.setDefinition('CalibrationSlabRephaserSeparate', 1);
 seq.setDefinition('KspaceOrdering', 'negative_to_positive');
+seq.setDefinition('ImageKspaceOrdering', 'negative_to_positive');
+seq.setDefinition('CalibrationKspaceOrdering', 'negative_to_positive');
 
 %% Compact sequence filename
 % Keep the complete filename below the scanner interpreter's
 % 128-character limit, including the version suffix and ".seq".
 %
 % Example:
-% gre_3d_wave_FC_FOV220x220x180_res0p88x0p88x2p5_...
-% E1_Ry3_Rz1_os4_amp8_cyc10_TRA_prisma_v151.seq
+% gre_3d_wave_FC_FOV200x240x250_res1x1x1_E2_...
+% Rlin3_Rpar1_os4_amp8_cyc10_FA15-7_SAG_skyra_v151.seq
 
 compactNum = @(x) strrep( ...
     strrep(sprintf('%.4g', x), '.', 'p'), ...
@@ -2424,40 +2671,23 @@ resTokens = arrayfun(compactNum, res_mm, ...
 fovString = strjoin(fovTokens, 'x');
 resString = strjoin(resTokens, 'x');
 
-if isUseFlowComp
-    fcString = 'FC';
+if centerWaveAroundNowave
+    centerTag = 'sinctr';
 else
-    fcString = 'noFC';
+    centerTag = 'sinzero';
 end
-
-if isUseWave_sin || isUseWave_cos
-    sequenceName = 'gre_3d_wave';
-else
-    sequenceName = 'gre_3d_nowave';
-end
-
 seqBaseName = sprintf( ...
-    ['%s_%s_FOV%s_res%s_E%d_' ...
-     'Ry%d_Rz%d_os%d_amp%s_cyc%d_%s_%s'], ...
-    sequenceName, ...
-    fcString, ...
-    fovString, ...
-    resString, ...
-    Nechoes, ...
-    Ry, ...
-    Rz, ...
-    os_factor, ...
-    compactNum(gwave_max), ...
-    Ncycles, ...
-    slOrientation, ...
-    sys_type);
+    ['gre_waveFC_SAG_FOV%s_E%d_R%dx%d_os%d_', ...
+    'A%s_C%d_%s_%s'], ...
+    fovString, Nechoes, Ry, Rz, os_factor, gwave_name, Ncycles, ...
+    centerTag, sys_type);
 
 % Store the format-independent name in the sequence header.
 seq.setDefinition('Name', seqBaseName);
 
 %% Write sequence
-outDir_v141 = fullfile(out_path, 'generated_seq_v141');
-outDir_v151 = fullfile(out_path, 'generated_seq_v151');
+outDir_v141 = fullfile(out_path, 'diagnostics', 'invalid_v1.4.1');
+outDir_v151 = out_path;
 
 if write_v141_format && ~exist(outDir_v141, 'dir')
     mkdir(outDir_v141);
@@ -2470,15 +2700,15 @@ end
 fileName_v141 = [seqBaseName '_v141.seq'];
 fileName_v151 = [seqBaseName '_v151.seq'];
 
-% The scanner filename must contain fewer than 128 characters.
-assert(numel(fileName_v141) < 128, ...
+% Keep evaluation filenames below 100 characters.
+assert(numel(fileName_v141) <= 100, ...
     ['The v141 sequence filename contains %d characters. ' ...
-     'It must contain fewer than 128 characters:\n%s'], ...
+     'It must contain at most 100 characters:\n%s'], ...
     numel(fileName_v141), fileName_v141);
 
-assert(numel(fileName_v151) < 128, ...
+assert(numel(fileName_v151) <= 100, ...
     ['The v151 sequence filename contains %d characters. ' ...
-     'It must contain fewer than 128 characters:\n%s'], ...
+     'It must contain at most 100 characters:\n%s'], ...
     numel(fileName_v151), fileName_v151);
 
 if write_v141_format
@@ -2497,8 +2727,7 @@ fprintf('Write to file (v151, %d filename characters):\n%s\n', ...
 
 %% Optional PNS/CNS and forbidden-frequency checks
 % The sequence is deliberately written before these optional checks.
-do_pns_check = promptYesNoFromWorkspace('do_pns_check', ...
-    'Perform PNS/CNS check?', false);
+do_pns_check = false;
 if do_pns_check
     if isempty(safe_pns_prediction_path) || ~exist(safe_pns_prediction_path,'dir')
         fprintf('Skipping PNS/CNS check: safe_pns_prediction_path is unavailable.\n');
@@ -2525,8 +2754,7 @@ if do_pns_check
     end
 end
 
-do_forbidden_frequency_check = promptYesNoFromWorkspace( ...
-    'do_forbidden_frequency_check', 'Perform forbidden-frequency check?', false);
+do_forbidden_frequency_check = false;
 if do_forbidden_frequency_check
     if isGEscanner
         fprintf('Skipping forbidden-frequency check for premier/GE.\n');

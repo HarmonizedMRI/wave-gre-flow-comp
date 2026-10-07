@@ -1,4 +1,4 @@
-% gre_3d_wave_with_flash_calibration_sag_high_slew_cases.m
+% gre_3d_wave_with_flash_calibration_tra.m
 % Author: Yiyun Dong
 % Affiliation: Athinoula A. Martinos Center for Biomedical Imaging
 % Date: 2026-09-21
@@ -29,8 +29,8 @@
 %   [LIN=72, PAR=72, SET=5]. A typical loader shape is
 %   [Nx_os, Ncoil, 72, 72, 5]; unacquired stripe entries remain zero.
 %
-% Geometry is SAG for both acquisitions:
-%   RO=z, LIN=y/sine, PAR=x/cosine/slab-select.
+% Geometry is TRA for both acquisitions:
+%   RO=x, LIN=y/sine, PAR=z/cosine/slab-select.
 %   GRE and calibration LIN/PAR indices both map from negative to positive
 %   physical k-space as the MATLAB/TWIX array indices increase.
 %
@@ -39,8 +39,8 @@
 %
 % Local helper functions are stored in ./utils/.
 %
-% Do not call clear/clear all here: users may predefine path variables in the
-% MATLAB workspace before running this script.
+% Do not call clear/clear all here: users may predefine Ncycles and
+% centerWaveAroundNowave in the MATLAB workspace before running this script.
 close all; clc
 format long
 
@@ -56,7 +56,7 @@ addpath(utils_path);
 pulseq_path = '/Users/yiyund/Code_mgh/pulseq';
 safe_pns_prediction_path = '/Users/yiyund/Code_mgh/safe_pns_prediction';
 out_path = fullfile(repo_root, 'evaluation', 'output', 'v1.5.1', ...
-    'high_slew_wave_gre');
+    'high_slew_wave_gre_tra');
 system_asc_file = '/Users/yiyund/Code_mgh/pulseq/matlab/idea/asc/MP_GPA_K2309_2250V_793A_GC99.asc';
 
 pulseq_matlab_path = fullfile(pulseq_path, 'matlab');
@@ -88,11 +88,24 @@ tag_calib = '';
 
 % ------------------------- sequence timing -------------------------
 alphaGre       = 15;                         % [deg], image contrast
-alphaCal       = 7;                          % [deg], matched FLASH calibration
-TE             = [10 20] * 1e-3;       % [s]
-% TE             = [20] * 1e-3;       % [s]
+alphaCal       = 15;                         % [deg], preserve the TRA calibration contract
+if ~exist('Ncycles', 'var') || isempty(Ncycles)
+    Ncycles = 20;
+end
+minTE1         = 10e-3;                      % [s]
+minEchoSpacing = 10e-3;                      % [s]
+minTR          = 30e-3;                      % [s]
+% The C10 TRA full-FC/readout envelopes require one additional 0.14 ms
+% raster-exact echo-spacing margin. Treat 10/20/30 ms as minima rather than
+% rejecting an otherwise valid sequence. C20/C25 retain the minima exactly.
+if Ncycles == 10
+    echoSpacingAdjustment = 0.14e-3;
+else
+    echoSpacingAdjustment = 0;
+end
+TE             = [minTE1, minTE1+minEchoSpacing+echoSpacingAdjustment];
 Nechoes        = numel(TE);
-TR             = 30e-3;                      % [s]
+TR             = minTR;                      % [s], raised later only if required
 rfSpoilingInc  = 50;                         % [deg]
 NdummyGre      = 300;
 naverage       = 1;
@@ -142,7 +155,7 @@ prepToReadoutGap = 0;
 % Step 11: optionally add PAR drift compensation into the inter-echo
 % PAR/cosine module. Because the cosine module has nonzero M0, one waveform
 % is designed per echo gap and per PAR-z index with the same timing.
-% This high-slew evaluation entry point supports the complete FC path only.
+% This transverse entry point supports the complete FC path only.
 % Partial-FC combinations are deliberately out of scope.
 isUseFlowComp = true;
 isFCInterEchoReadoutCos = true;
@@ -179,18 +192,18 @@ fixedPEPreDuration = TPre;         % used only when gPEPreTimingMode = 'fixed'
 % ------------------------- geometry -------------------------
 % Physical arrays remain [x y z]. Legacy Nx/Ny/Nz variable names below are
 % retained as logical RO/LIN/PAR sizes to avoid rewriting validated FC math.
-slOrientation = 'SAG';
+slOrientation = 'TRA';
 ax = struct;
-ax.d1 = 'z';                                 % readout
-ax.d2 = 'x';                                 % inner PE / PAR / partition
+ax.d1 = 'x';                                 % readout
+ax.d2 = 'z';                                 % inner PE / PAR / partition
 ax.d3 = 'y';                                 % outer PE / LIN / phase
 ax.n1 = strfind('xyz', ax.d1);
 ax.n2 = strfind('xyz', ax.d2);
 ax.n3 = strfind('xyz', ax.d3);
 
-target_fov = [200 240 250] * 1e-3;          % physical [x y z], m
-fov = [200 240 250] * 1e-3;                 % encoded physical [x y z], m
-sliceOS = 0;
+target_fov = [220 220 160] * 1e-3;          % physical [x y z], m
+fov = [220 220 180] * 1e-3;                 % encoded physical [x y z], m
+sliceOS = 0.125;
 
 % Requested voxel size [x y z], in mm. The matrix N is derived from fov and
 % res, with each dimension rounded to the nearest even integer so that the
@@ -208,30 +221,30 @@ sliceOS = 0;
 %     res = [0.92  0.92  2.5 ];  % N ~= [240 240 72]
 % res = [0.92 0.92 2.5];          % requested resolution [x y z], in mm
 % res = [0.88 0.88 2.5];          % requested resolution [x y z], in mm
-res = [1 1 1];                  % requested resolution [x y z], mm
+res = [0.88 0.88 2.5];         % requested resolution [x y z], mm
 N = 2 * round((fov(:).' * 1e3 ./ res) / 2);
 actualRes = fov(:).' ./ N * 1e3; % actual achieved resolution [x y z], in mm
 fprintf('Requested resolution [x y z] = [%.4g %.4g %.4g] mm. Derived N = [%d %d %d]. Actual resolution = [%.4g %.4g %.4g] mm.\n', ...
     res(1), res(2), res(3), N(1), N(2), N(3), actualRes(1), actualRes(2), actualRes(3));
 
-Nx    = N(ax.n1);               % logical RO count = physical Nz = 250
-Ny    = N(ax.n3);               % logical LIN count = physical Ny = 240
-Nz    = N(ax.n2);               % logical PAR count = physical Nx = 200
+Nx    = N(ax.n1);               % logical RO count = physical Nx = 250
+Ny    = N(ax.n3);               % logical LIN count = physical Ny = 250
+Nz    = N(ax.n2);               % logical PAR count = physical Nz = 72
 Nx_os = Nx * os_factor;
 
-slabExciteThickness = target_fov(ax.n2);     % RF excites physical x slab [m]
-slabEncodeThickness = fov(ax.n2);            % PAR encodes physical x slab [m]
+slabExciteThickness = target_fov(ax.n2);     % RF excites physical z slab [m]
+slabEncodeThickness = fov(ax.n2);            % PAR encodes physical z slab [m]
 
-assert(strcmp(slOrientation, 'SAG'), 'This matched sequence is SAG only.');
-assert(isequal(N, [200 240 250]), 'Physical matrix must be [200 240 250].');
-assert(strcmp(ax.d1, 'z') && strcmp(ax.d2, 'x') && strcmp(ax.d3, 'y'), ...
-    'SAG mapping must be RO=z, PAR=x, LIN=y.');
-assert(Nx == 250 && Ny == 240 && Nz == 200, ...
-    'Logical RO/LIN/PAR sizes must be 250/240/200.');
+assert(strcmp(slOrientation, 'TRA'), 'This sequence entry is TRA only.');
+assert(isequal(N, [250 250 72]), 'Physical matrix must be [250 250 72].');
+assert(strcmp(ax.d1, 'x') && strcmp(ax.d2, 'z') && strcmp(ax.d3, 'y'), ...
+    'TRA mapping must be RO=x, PAR=z, LIN=y.');
+assert(Nx == 250 && Ny == 250 && Nz == 72, ...
+    'Logical RO/LIN/PAR sizes must be 250/250/72.');
 
 % ------------------------- acceleration -------------------------
 Ry = 3;                                      % acceleration along LIN/y
-Rz = 1;                                      % acceleration along PAR/x
+Rz = 1;                                      % acceleration along PAR/z
 
 % ------------------------- FLASH calibration -------------------------
 % Calibration is appended after the GRE image acquisition and routed to
@@ -247,9 +260,6 @@ calibWaveDebugFlag = false;
 
 % ------------------------- wave -------------------------
 swave_max     = 200;                         % [T/m/s]
-if ~exist('Ncycles', 'var') || isempty(Ncycles)
-    Ncycles = 20;
-end
 switch Ncycles
     case 10
         gwave_max = 12.732;                  % [mT/m]
@@ -276,7 +286,7 @@ if ~exist('centerWaveAroundNowave', 'var') || ...
     centerWaveAroundNowave = false;
 end
 isUseWave_sin = true;                        % y-channel sine wave
-isUseWave_cos = true;                        % x-channel cosine wave
+isUseWave_cos = true;                        % z-channel cosine wave
 % isUseWave_sin = false;                        % y-channel sine wave
 % isUseWave_cos = false;                        % z-channel cosine wave
 waveSinChannel = ax.d3;
@@ -459,11 +469,11 @@ seq = mr.Sequence(sys_sequence);
     'use', 'excitation');
 
 % makeSincPulse returns z-channel gradients; remap slab-select and rephaser
-% to the SAG PAR/slab axis, physical x.
+% to the TRA PAR/slab axis, physical z.
 gz_ss.channel = ax.d2;
 gz_ssReph.channel = ax.d2;
-assert(strcmp(gz_ss.channel, 'x') && strcmp(gz_ssReph.channel, 'x'), ...
-    'SAG image slab-select gradients must use Gx.');
+assert(strcmp(gz_ss.channel, 'z') && strcmp(gz_ssReph.channel, 'z'), ...
+    'TRA image slab-select gradients must use Gz.');
 
 % K-space units are 1/m in Pulseq MATLAB.
 deltak = 1 ./ fov;
@@ -567,7 +577,7 @@ tReadGradEndForFC   = mr.calcDuration(gxRead);
     tGxRead, aGxRead, 0, t_adc_center, 0);
 readoutInitialFCTargetM1 = -readoutFirstHalfM1;
 
-fprintf(['\nStep 5/6 RO/z initial-FC M1 diagnostic:\n', ...
+fprintf(['\nStep 5/6 RO/x initial-FC M1 diagnostic:\n', ...
          '  reference time = readout/wave module start\n', ...
          '  echo center in readout module          = %.6f ms\n', ...
          '  first-half readout M0                  = %.9g 1/m\n', ...
@@ -579,9 +589,9 @@ fprintf(['\nStep 5/6 RO/z initial-FC M1 diagnostic:\n', ...
 % explicitly monopolar multi-echo GRE.
 gxSpoilArea = gre_ro_spoil * Nx * deltak(ax.n1);
 gxSpoil = mr.makeTrapezoid(ax.d1, 'Area', gxSpoilArea, ...
-    'Duration', TPre, 'system', sys_lowPNS);
+    'system', sys_lowPNS); % shortest feasible low-PNS duration for TRA FOV
 
-% PE areas use logical LIN/y and PAR/x axes from the physical FOV.
+% PE areas use logical LIN/y and PAR/z axes from the physical FOV.
 phaseAreasY = ((0:Ny-1) - Ny/2) * deltak(ax.n3);
 phaseAreasZ = ((0:Nz-1) - Nz/2) * deltak(ax.n2);
 
@@ -693,7 +703,7 @@ fprintf(['PE/slab prephaser timing mode: %s\n', ...
          '  TxPre remains %.6f ms for spoilers/fixed PE timing, but RO/cos prep uses min common duration.\n'], ...
     gPEPreTimingMode, naturalGPEPreDur*1e3, gPEPreDur*1e3, fixedPEPreDuration*1e3, TxPre*1e3);
 if isUseSlabRephFCPreview
-    fprintf(['  Step 9d slab FC active: Gx slab-select late M0/M1 about rephaser start = %.9g / %.9g; ', ...
+    fprintf(['  Step 9d slab FC active: Gz slab-select late M0/M1 about rephaser start = %.9g / %.9g; ', ...
              'slab target M0/M1 = %.9g / %.9g; slab FC duration = %.6f ms'], ...
         gzSsLateM0, gzSsLateM1AtRephStart, gzSlabRephM0Target, gzSlabRephM1TargetAtStart, gPEPreDur*1e3);
 end
@@ -1553,8 +1563,8 @@ if isUseInitialYFC
 end
 
 if isUseInitialZFC
-    fprintf('\nInitial PAR/x + cosine merged FC Step 9c summary:\n');
-    fprintf('  active PAR/x merged prephaser FC=%d, active cosine initial FC=%d\n', ...
+    fprintf('\nInitial PAR/z + cosine merged FC Step 9c summary:\n');
+    fprintf('  active PAR/z merged prephaser FC=%d, active cosine initial FC=%d\n', ...
         isUseMergedInitialZPreFC, isUseInitialCosineFC);
     fprintf('  merged cosine M0 contribution = %.9g 1/m\n', gzInitialMergedCosM0);
     fprintf('  actual cosine head M0 through TE1 = %.9g 1/m\n', gzInitialCosHeadM0);
@@ -1591,7 +1601,7 @@ if isUseAnyInitialXCosFC
     fprintf('  common initial prep duration = %.6f ms (grew by %d x 4-raster steps)\n', ...
         prepModuleDurTarget(1)*1e3, initialXCosFCGrowIters);
     if isUseInitialReadoutFC
-        fprintf(['  RO/z readout: M0 target/actual = %.9g / %.9g 1/m, ', ...
+        fprintf(['  RO/x readout: M0 target/actual = %.9g / %.9g 1/m, ', ...
                  'M1 target/base/add/final = %.9g / %.9g / %.9g / %.9g 1/m*s, ', ...
                  'H=%.6f kHz/m, B=%.6f kHz/m, Gpk=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
             initialReadoutFCInfo.areaTarget, initialReadoutFCInfo.finalM0, ...
@@ -1601,7 +1611,7 @@ if isUseAnyInitialXCosFC
             initialReadoutFCInfo.gradPeak*1e-3, initialReadoutFCInfo.slewPeak/sys.gamma);
     end
     if isUseSeparateInitialCosineFC
-        fprintf(['  PAR/x cosine separate pre: M0 target/actual = %.9g / %.9g 1/m, ' ...
+        fprintf(['  PAR/z cosine separate pre: M0 target/actual = %.9g / %.9g 1/m, ' ...
                  'M1 target/base/add/final = %.9g / %.9g / %.9g / %.9g 1/m*s, ', ...
                  'H=%.6f kHz/m, B=%.6f kHz/m, Gpk=%.6f kHz/m, slew=%.6f T/m/s equiv\n'], ...
             initialCosineFCInfo.areaTarget, initialCosineFCInfo.finalM0, ...
@@ -1620,21 +1630,21 @@ waveCarryZ = sum(waveAreaZ);
 
 fprintf('\nWave carry-area summary after %d echoes:\n', Nechoes);
 fprintf('  y/sine total area   = %.9g 1/m\n', waveCarryY);
-fprintf('  PAR/x cosine total area = %.9g 1/m\n', waveCarryZ);
+fprintf('  PAR/z cosine total area = %.9g 1/m\n', waveCarryZ);
 if isUseWave_sin
     fprintf('  y/sine readout-wave M1 only, echo 1 = %.9g 1/m*s\n', sineReadM1(1));
     fprintf('  y/sine readout-wave M1 only, all echoes = %s 1/m*s\n', mat2str(sineReadM1, 9));
 end
 if isUseWave_cos
-    fprintf('  PAR/x cosine ramp-up M1 diagnostic only, echo 1 = %.9g 1/m*s\n', cosRampUpM1(1));
-    fprintf('  PAR/x cosine ramp-up M1 diagnostic only, all echoes = %s 1/m*s\n', mat2str(cosRampUpM1, 9));
+    fprintf('  PAR/z cosine ramp-up M1 diagnostic only, echo 1 = %.9g 1/m*s\n', cosRampUpM1(1));
+    fprintf('  PAR/z cosine ramp-up M1 diagnostic only, all echoes = %s 1/m*s\n', mat2str(cosRampUpM1, 9));
     fprintf('  actual initial cosine-head M0 through TE1 = %.9g 1/m\n', gzInitialCosHeadM0);
     fprintf('  actual initial cosine-head M1 about TE1 = %.9g 1/m*s\n', ...
         gzInitialCosHeadM1AboutTE1);
     fprintf('  robust initial cosine-FC helper-ref target M1 = %.9g 1/m*s\n', ...
         cosInitialFCTargetM1);
 end
-fprintf('  RO/z readout module duration   = %.6f ms\n', readoutModuleDurX*1e3);
+fprintf('  RO/x readout module duration   = %.6f ms\n', readoutModuleDurX*1e3);
 fprintf('  cosine-derived wave envelope   = %.6f ms\n', waveBlockEnvelopeDur*1e3);
 
 % Worst-case rewinders now include the accumulated wave area in that axis.
@@ -1660,7 +1670,7 @@ assert(ismember(floor(Ny/2)+1, imageYIdx) && ...
     'Accelerated image sampling must include both k-space center indices.');
 
 fprintf('\nGRE PE table:\n');
-fprintf('  Image: %d y/LIN x %d x/PAR = %d PE positions\n', ...
+fprintf('  Image: %d y/LIN x %d z/PAR = %d PE positions\n', ...
     numel(imageYIdx), numel(imageZIdx), nImagePE);
 fprintf('  Readouts: %d PE positions x %d echoes x %d averages = %d\n', ...
     nImagePE, Nechoes, naverage, nImagePE*Nechoes*naverage);
@@ -1805,8 +1815,19 @@ for c = 2:Nechoes
     end
 end
 
-assert(delayTE(1) >= -seq.gradRasterTime/10, ...
-    'TE(1) is too short for RF, echo-1 prep, and readout timing.');
+% TE1 is a minimum target. If the selected FC case needs more room, shift
+% every echo together by the smallest gradient-raster increment so the echo
+% spacing (and therefore all inter-echo M0/M1 targets) stays unchanged.
+te1TimingAdjustment = 0;
+if delayTE(1) < prephBlockMinDur-seq.gradRasterTime/10
+    te1TimingAdjustment = ceil( ...
+        (prephBlockMinDur-delayTE(1))/seq.gradRasterTime-1e-9) ...
+        *seq.gradRasterTime;
+    delayTE(1) = delayTE(1)+te1TimingAdjustment;
+    TE = TE+te1TimingAdjustment;
+end
+assert(delayTE(1) >= prephBlockMinDur-seq.gradRasterTime/10, ...
+    'Failed to raise TE1 to the shortest feasible raster duration.');
 assert(all(delayTE(2:end) >= -seq.gradRasterTime/10), ...
     'Echo spacing is too short. Increase TE spacing or shorten readout/flyback/wave duration.');
 assert(all(prepToReadoutGapEcho >= -seq.gradRasterTime/10), ...
@@ -1818,7 +1839,10 @@ readoutTrainTime = delayTE(1) + prepModuleDur(1) + prepToReadoutGapEcho(1) + rea
 for c = 2:Nechoes
     readoutTrainTime = readoutTrainTime + delayTE(c) + prepModuleDur(c) + prepToReadoutGapEcho(c) + readoutBlockDur(c);
 end
-delayTR = round((TR - rfBlockDur - readoutTrainTime) / seq.gradRasterTime) * seq.gradRasterTime;
+TR_target = TR;
+delayTR = round((TR_target-rfBlockDur-readoutTrainTime) ...
+    /seq.gradRasterTime)*seq.gradRasterTime;
+delayTR = max(delayTR, spoilerBlockMinDur);
 
 TE_actual = zeros(size(TE));
 TE_actual(1) = rfCenterToEndExc + delayTE(1) + prepModuleDur(1) + prepToReadoutGapEcho(1) + t_adc_center;
@@ -1827,8 +1851,9 @@ for c = 2:Nechoes
         + (readoutBlockDur(c-1) - t_adc_center) ...
         + delayTE(c) + prepModuleDur(c) + prepToReadoutGapEcho(c) + t_adc_center;
 end
-TR_actual = rfBlockDur + readoutTrainTime + max(delayTR, spoilerBlockMinDur);
+TR_actual = rfBlockDur+readoutTrainTime+delayTR;
 TR_min_feasible = rfBlockDur + readoutTrainTime + spoilerBlockMinDur;
+trTimingAdjustment = max(0, TR_actual-TR_target);
 
 fprintf('\nTiming summary before sequence loop:\n');
 fprintf('  rfBlockDur=%.6f ms, rfCenterToEndExc=%.6f ms\n', rfBlockDur*1e3, rfCenterToEndExc*1e3);
@@ -1839,14 +1864,14 @@ fprintf('  prepToReadoutGap input=%.6f ms, inter-echo centered FC=%d, sine FC in
 fprintf('  readout gradient start/end in module = %.6f / %.6f ms\n', ...
     tReadGradStart*1e3, tReadGradEnd*1e3);
 fprintf('  adc.delay=%.6f ms, adc center in readout module=%.6f ms\n', adc.delay*1e3, t_adc_center*1e3);
-fprintf('  RO/z readout module duration = %.6f ms; requested inter-echo spacings = %s ms\n', ...
+fprintf('  RO/x readout module duration = %.6f ms; requested inter-echo spacings = %s ms\n', ...
     readoutModuleDurX*1e3, mat2str(diff(TE)*1e3));
 for c = 1:Nechoes
     fprintf('  Echo %d: prepModuleDur=%.6f ms, readoutBlockDur=%.6f ms, delayTE=%.6f ms, postPrepGap=%.6f ms, TE_target=%.6f ms, TE_actual=%.6f ms, err=%.3f us\n', ...
         c, prepModuleDur(c)*1e3, readoutBlockDur(c)*1e3, delayTE(c)*1e3, prepToReadoutGapEcho(c)*1e3, TE(c)*1e3, TE_actual(c)*1e3, (TE_actual(c)-TE(c))*1e6);
 end
 if isUseInterEchoCenteredFC
-    fprintf('\nInter-echo centered FC placement relative to RO/z gradient support:\n');
+    fprintf('\nInter-echo centered FC placement relative to RO/x gradient support:\n');
     for c = 2:Nechoes
         fprintf(['  Echo %d: ESP=%.6f ms, readoutGradGap=%.6f ms, prepDur=%.6f ms, ', ...
                  'gapBefore=%.6f ms, gapAfter=%.6f ms, centerErr=%.3f us, ', ...
@@ -1857,13 +1882,12 @@ if isUseInterEchoCenteredFC
     end
 end
 fprintf('  TR_target=%.6f ms, delayTR=%.6f ms, TR_actual=%.6f ms, TR_min_feasible=%.6f ms, err=%.3f us\n\n', ...
-    TR*1e3, delayTR*1e3, TR_actual*1e3, TR_min_feasible*1e3, (TR_actual-TR)*1e6);
+    TR_target*1e3, delayTR*1e3, TR_actual*1e3, TR_min_feasible*1e3, (TR_actual-TR_target)*1e6);
 
-assert(delayTE(1) >= prephBlockMinDur, ...
-    'TE(1)=%.6f ms is too short. Minimum feasible TE(1) is %.6f ms with current settings.', ...
-    TE(1)*1e3, (rfCenterToEndExc + prephBlockMinDur + prepModuleDur(1) + prepToReadoutGapEcho(1) + t_adc_center)*1e3);
-assert(delayTR >= spoilerBlockMinDur, ...
-    'TR=%.6f ms is too short. Increase TR to at least %.6f ms.', TR*1e3, TR_min_feasible*1e3);
+assert(delayTE(1) >= prephBlockMinDur-seq.gradRasterTime/10);
+assert(delayTR >= spoilerBlockMinDur-seq.gradRasterTime/10);
+TE = TE_actual;
+TR = TR_actual;
 
 %% Precompute PE prewinders/rewinders and labels
 
@@ -2071,8 +2095,8 @@ MODE_SIN    = 2;
 MODE_COS    = 3;
 calibModeNames = {'nowave', 'sin', 'cos'};
 
-% Calibration uses the shared SAG geometry and readout settings, but keeps a
-% separate readout spoiler value and the Wave-MPRAGE FLASH flip angle.
+% Calibration uses the shared TRA geometry and readout settings, while
+% preserving the original TRA FLASH flip angle.
 [rfCal, gzCalSs, gzCalSsReph] = mr.makeSincPulse(alphaCal*pi/180, sys_lowPNS, ...
     'Duration', rfDuration, ...
     'SliceThickness', slabExciteThickness, ...
@@ -2082,8 +2106,8 @@ calibModeNames = {'nowave', 'sin', 'cos'};
 
 gzCalSs.channel = ax.d2;
 gzCalSsReph.channel = ax.d2;
-assert(strcmp(gzCalSs.channel, 'x') && strcmp(gzCalSsReph.channel, 'x'), ...
-    'SAG calibration slab-select gradients must use Gx.');
+assert(strcmp(gzCalSs.channel, 'z') && strcmp(gzCalSsReph.channel, 'z'), ...
+    'TRA calibration slab-select gradients must use Gz.');
 
 calibDwell = dwell;
 calibTread = calibDwell * Nx_os;
@@ -2217,7 +2241,7 @@ gpeCalLinPre_sin     = cell(1, N(ax.n3));
 gpeCalLinPost_sin    = cell(1, N(ax.n3));
 calibPostDurations = mr.calcDuration(groCalSp);
 
-% SAG mapping: PAR/x carries cosine; LIN/y carries sine.
+% TRA mapping: PAR/z carries cosine; LIN/y carries sine.
 for izCal = 1:N(ax.n2)
     gpePreNow = mr.scaleGrad(gpeCalParPreMax, calibParScales(izCal));
     gpeCalParPre_nowave{izCal} = gpePreNow;
@@ -2314,7 +2338,7 @@ assert(all(diff(calibLinAreas(kyCalAcs)) > 0), ...
 assert(all(diff(calibParAreas(kzCalAcs)) > 0), ...
     'Calibration ACS PAR block is not ordered negative-to-positive.');
 fprintf(['Calibration PE ordering: negative-to-positive for both LIN/y and ', ...
-    'PAR/x; compact local labels increase with physical k-space.\n']);
+    'PAR/z; compact local labels increase with physical k-space.\n']);
 
 calParts = struct('id', {}, 'name', {}, 'mode', {}, ...
     'kyList', {}, 'kzList', {}, 'isACS', {});
@@ -2566,6 +2590,12 @@ seq.setDefinition('ImageFlipAngle', alphaGre);
 seq.setDefinition('CalibrationFlipAngle', alphaCal);
 seq.setDefinition('TE', TE);
 seq.setDefinition('TR', TR);
+seq.setDefinition('MinimumTE1', minTE1);
+seq.setDefinition('MinimumEchoSpacing', minEchoSpacing);
+seq.setDefinition('MinimumTR', minTR);
+seq.setDefinition('TE1TimingAdjustment', te1TimingAdjustment);
+seq.setDefinition('EchoSpacingTimingAdjustment', echoSpacingAdjustment);
+seq.setDefinition('TRTimingAdjustment', trTimingAdjustment);
 seq.setDefinition('Nechoes', Nechoes);
 seq.setDefinition('Averages', naverage);
 seq.setDefinition('Ry', Ry);
@@ -2653,8 +2683,8 @@ seq.setDefinition('CalibrationKspaceOrdering', 'negative_to_positive');
 % 128-character limit, including the version suffix and ".seq".
 %
 % Example:
-% gre_3d_wave_FC_FOV200x240x250_res1x1x1_E2_...
-% Rlin3_Rpar1_os4_amp8_cyc10_FA15-7_SAG_skyra_v151.seq
+% gre_waveFC_TRA_FOV220x220x180_E2_R3x1_os4_...
+% A6p3662_C20_sinzero_skyra_v151.seq
 
 compactNum = @(x) strrep( ...
     strrep(sprintf('%.4g', x), '.', 'p'), ...
@@ -2677,7 +2707,7 @@ else
     centerTag = 'sinzero';
 end
 seqBaseName = sprintf( ...
-    ['gre_waveFC_SAG_FOV%s_E%d_R%dx%d_os%d_', ...
+    ['gre_waveFC_TRA_FOV%s_E%d_R%dx%d_os%d_', ...
     'A%s_C%d_%s_%s'], ...
     fovString, Nechoes, Ry, Rz, os_factor, gwave_name, Ncycles, ...
     centerTag, sys_type);
