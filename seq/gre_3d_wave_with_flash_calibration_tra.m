@@ -262,8 +262,9 @@ calibWaveDebugFlag = false;
 swave_max     = 200;                         % [T/m/s]
 switch Ncycles
     case 10
-        gwave_max = 12.732;                  % [mT/m]
-        gwave_name = '12p732';
+        % gwave_max = 12.732;                % [mT/m], original C10 reference
+        gwave_max = 10.0;                    % [mT/m], conservative active C10 amplitude
+        gwave_name = '10';
         calibPreDurationFloor = 1.19e-3;      % [s], accepted standalone C10
     case 20
         gwave_max = 6.3662;                  % [mT/m]
@@ -274,7 +275,8 @@ switch Ncycles
         gwave_name = '5p093';
         calibPreDurationFloor = 0.96e-3;      % [s], accepted standalone C25
     otherwise
-        error(['Supported wave cases are Ncycles=10/Gmax=12.732, ', ...
+        error(['Supported wave cases are Ncycles=10/Gmax=10.0 ', ...
+            '(original reference 12.732), ', ...
             'Ncycles=20/Gmax=6.3662, and Ncycles=25/Gmax=5.093 mT/m.']);
 end
 
@@ -2652,6 +2654,7 @@ seq.setDefinition('CalibrationWaveCosAxis', ax.d2);
 seq.setDefinition('CalibrationReadoutSamples', Nx_os);
 seq.setDefinition('CalibrationReadoutDuration', calibTread);
 seq.setDefinition('CalibrationWaveAmplitude_mTm', gwave_max);
+seq.setDefinition('C10ReferenceWaveAmplitude_mTm', 12.732);
 seq.setDefinition('CalibrationWaveSlew_Tms', swave_max);
 seq.setDefinition('CalibrationWaveCycles', Ncycles);
 seq.setDefinition('CalibrationWaveCenteredOnNowave', ...
