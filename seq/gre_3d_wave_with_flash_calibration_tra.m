@@ -90,7 +90,7 @@ tag_calib = '';
 alphaGre       = 15;                         % [deg], image contrast
 alphaCal       = 15;                         % [deg], preserve the TRA calibration contract
 if ~exist('Ncycles', 'var') || isempty(Ncycles)
-    Ncycles = 20;
+    Ncycles = 10;
 end
 minTE1         = 10e-3;                      % [s]
 minEchoSpacing = 10e-3;                      % [s]
@@ -366,7 +366,7 @@ elseif strcmp(sys_type,'CimaX')
 elseif strcmp(sys_type,'TerraX')
     physical_slew_max = 250;
     physical_grad_max = 135;
-    B0=2.89;
+    B0=6.98;
 else
     error('Undefined sys_type: %s', sys_type)
 end
