@@ -65,7 +65,8 @@ Current device behavior:
 |---|---|
 | Coil-compression estimation and application | CPU |
 | ESPIRiT sensitivity-map calibration | native `3d`: GPU or CPU; `slice2d`: CPU |
-| Wave/no-wave CG-SENSE | CPU |
+| Default Wave reconstruction | BART wavelet/FISTA (`-w -f`) |
+| Explicit legacy Wave/no-wave CG-SENSE | CPU |
 
 A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU. For acquisitions with more than 32 physical receiver channels, consider `--espirit-device cpu` when GPU memory is limited or CPU resources are more suitable.
 
@@ -214,11 +215,12 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --save-nifti-phase
 ```
 
-To also export the calibrated PSF, coil-compressed k-space, sensitivity maps,
-and ACS in BART CFL format, add `--save-bart-inputs`. The companion
-`recon/bart/run_wave_recon.sh` script runs BART `ecalib` and `wave` on the
-exported files, then converts the results with `python` from the active Conda
-environment or virtual environment. NIfTIs default to `BART_OUTPUT/nifti`.
+Wave acquisitions export the calibrated PSF, coil-compressed k-space,
+sensitivity maps, and ACS in BART CFL format by default, then run BART `ecalib`
+and wavelet/FISTA reconstruction. Select `--reconstruction-backend sense` only
+when the traditional local CG-SENSE solver is required. The companion
+`recon/bart/run_wave_recon.sh` can also be run independently. NIfTI conversion
+can be skipped with `--skip-nifti`.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

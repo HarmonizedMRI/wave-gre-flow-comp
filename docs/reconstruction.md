@@ -107,8 +107,10 @@ This checks the sequence trajectory and definitions without loading imaging data
 8. Interpolate and normalize the sensitivity maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
 10. For wave data, fit FLASH projection phase deviations, process the fitted PSF coefficients using the selected method, and construct calibrated echo-specific PSFs.
-11. Run wave or no-wave CG-SENSE on CPU for each echo.
-12. Save NumPy arrays, diagnostic plots, geometry metadata, and optional NIfTI outputs.
+11. By default, export BART inputs and run `bart wave -w -f` for every echo.
+12. When `--reconstruction-backend sense` is explicitly selected, run the
+    legacy wave or no-wave CG-SENSE solver on CPU for each echo.
+13. Save backend-appropriate outputs, diagnostics, and optional NIfTI outputs.
 
 ## CPU and GPU behavior
 
@@ -119,7 +121,8 @@ The full reconstruction is not moved to GPU.
 | Coil-compression estimation | CPU / NumPy and SciPy |
 | Coil-compression application | CPU / PyTorch tensor |
 | ESPIRiT calibration | native `3d`: SigPy CPU/GPU; `slice2d`: CPU processes |
-| Wave and no-wave CG-SENSE | CPU / PyTorch tensor |
+| Default Wave reconstruction | BART wavelet/FISTA |
+| Explicit legacy Wave/no-wave CG-SENSE | CPU / PyTorch tensor |
 
 ### ESPIRiT selection
 
@@ -180,22 +183,24 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--espirit-cpu-workers N` | automatic | Limit slice2d process workers |
 | `--cg-iters N` | `50` | Maximum CG iterations |
 | `--cg-tol VALUE` | `1e-6` | Relative CG stopping tolerance |
+| `--reconstruction-backend {bart,sense}` | `bart` | Run BART wavelet/FISTA by default or explicitly opt into local CG-SENSE |
 | `--yflip {-1,1}` | sequence-derived | Override LIN PSF sign |
 | `--zflip {-1,1}` | sequence-derived | Override PAR PSF sign |
 | `--psf-coefficient-processing {smooth,sine-line}` | `smooth` | Select PSF coefficient post-processing for wave data |
 | `--psf-fit-kx-min N` | none | Inclusive manual `sine-line` bound; omit both bounds for automatic selection |
 | `--psf-fit-kx-max N` | none | Exclusive manual `sine-line` bound; omit both bounds for automatic selection |
 | `--save-echo-npy` | off | Save one complex NumPy file per echo |
-| `--save-bart-inputs` | off | Export calibrated Wave-CAIPI inputs as BART CFL pairs |
+| `--save-bart-inputs` | automatic with BART | Also export calibrated Wave-CAIPI inputs when using the SENSE backend |
 | `--validate-only` | off | Validate sequence-derived configuration without reading TWIX |
 
 Use `--help` as the authoritative complete argument reference for the checked-out code.
 
 ## BART Wave-CAIPI input export
 
-Add `--save-bart-inputs` to a wave reconstruction to write BART-compatible
-`.hdr`/`.cfl` pairs under `<out>/bart_inputs`. When `--file-tag` is set, the
-folder becomes `bart_inputs_<tag>`.
+The default BART backend writes BART-compatible `.hdr`/`.cfl` pairs under
+`<out>/bart_inputs`, then reconstructs under `<out>/bart_output`. When
+`--file-tag` is set, both folder names receive the matching tag. With the
+explicit SENSE backend, `--save-bart-inputs` retains export-only behavior.
 
 The export uses BART's `READ`, `PHS1`, `PHS2`, `COIL`, and `MAPS` dimension
 order:
@@ -231,8 +236,10 @@ recon/bart/run_wave_recon.sh \
 The flags between `--ecalib-options` and `--end-ecalib-options` are passed
 unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
 section is passed unchanged to `bart wave`; the example requests wavelet
-regularization and FISTA. The helper prints each complete command before
-running it. If `--nifti-output` is omitted, converted files are written to
+regularization and FISTA. When the section is omitted, the wrapper defaults to
+`-w -f`. The helper prints each complete command before running it. Pass
+`--skip-nifti` to stop after BART reconstruction. Otherwise, if
+`--nifti-output` is omitted, converted files are written to
 `BART_OUTPUT/nifti`; pass the option only to override that location. Conversion
 uses `python` from the active Conda environment or virtual environment. Set
 `PYTHON_BIN` to select a different interpreter.

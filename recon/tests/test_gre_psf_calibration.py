@@ -287,6 +287,8 @@ class GrePsfCalibrationTests(unittest.TestCase):
             self.assertEqual(default["psf_coefficient_processing"], "smooth")
             self.assertIsNone(default["psf_fit_kx_min"])
             self.assertIsNone(default["psf_fit_kx_max"])
+            self.assertEqual(default["reconstruction_backend"], "bart")
+            self.assertTrue(default["save_bart_inputs"])
 
             automatic = native._collect_runtime_config(
                 [

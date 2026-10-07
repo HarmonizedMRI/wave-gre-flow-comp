@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 # File/workflow arguments belong to this wrapper. Options inside the three
 # delimited sections are passed unchanged to BART or wave_to_nifti.py.
@@ -16,6 +16,7 @@ Usage:
     [--nifti-output PATH] \
     [--existing-maps CFL_BASENAME] \
     [--save-phase] \
+    [--skip-nifti] \
     [--ecalib-options BART_OPTIONS... --end-ecalib-options] \
     [--wave-options BART_OPTIONS... --end-wave-options] \
     [--nifti-options OPTIONS... --end-nifti-options]
@@ -33,6 +34,8 @@ Optional wrapper arguments:
   --existing-maps BASE    Existing ESPIRiT CFL basename. Defaults to
                           BART_INPUT/coil_sens with --maps-source existing.
   --save-phase            Also write phase NIfTI files.
+  --skip-nifti            Stop after BART reconstruction without converting
+                          the output to NIfTI.
   -h, --help              Show this help.
 
 Direct option sections:
@@ -41,7 +44,8 @@ Direct option sections:
       because the NIfTI converter accepts one ESPIRiT map set.
 
   --wave-options ... --end-wave-options
-      Passed unchanged to `bart wave`. Common BART wave options are:
+      Passed unchanged to `bart wave`. When omitted, the wrapper uses `-w -f`
+      (wavelet regularization with FISTA). Common BART wave options are:
         -w          wavelet regularization
         -l          locally low-rank (LLR) regularization
         -r VALUE    regularization strength
@@ -132,6 +136,7 @@ TWIX_FILE=""
 SEQUENCE_FILE=""
 NIFTI_OUTPUT=""
 SAVE_PHASE=0
+SKIP_NIFTI=0
 ECALIB_OPTIONS=()
 WAVE_OPTIONS=()
 NIFTI_OPTIONS=()
@@ -154,6 +159,8 @@ while (($#)); do
             require_value "$1" "${2:-}"; NIFTI_OUTPUT="${2%/}"; shift 2 ;;
         --save-phase)
             SAVE_PHASE=1; shift ;;
+        --skip-nifti)
+            SKIP_NIFTI=1; shift ;;
         --ecalib-options)
             shift
             while (($#)) && [[ "$1" != "--end-ecalib-options" ]]; do
@@ -203,12 +210,19 @@ PYTHON_EXECUTABLE="${PYTHON_BIN:-python}"
 [[ -n "$NIFTI_OUTPUT" ]] || NIFTI_OUTPUT="$BART_OUTPUT/nifti"
 command -v "$BART_EXECUTABLE" >/dev/null 2>&1 ||
     fail "BART executable not found: $BART_EXECUTABLE"
-command -v "$PYTHON_EXECUTABLE" >/dev/null 2>&1 ||
-    fail "Python interpreter not found: $PYTHON_EXECUTABLE. Activate the intended Conda environment or virtual environment first."
+if ((!SKIP_NIFTI)); then
+    command -v "$PYTHON_EXECUTABLE" >/dev/null 2>&1 ||
+        fail "Python interpreter not found: $PYTHON_EXECUTABLE. Activate the intended Conda environment or virtual environment first."
+fi
 
 # A second -m could conflict with the visible, required one-map setting below.
 array_contains -m "${ECALIB_OPTIONS[@]}" &&
     fail "Do not pass -m in --ecalib-options; this workflow explicitly uses -m 1."
+
+if ((${#WAVE_OPTIONS[@]} == 0)); then
+    WAVE_OPTIONS=(-w -f)
+    echo "No --wave-options supplied; using BART wavelet/FISTA defaults: -w -f"
+fi
 
 USES_WAVELET=0
 USES_LLR=0
@@ -225,7 +239,10 @@ fi
 array_contains -b "${WAVE_OPTIONS[@]}" && ((!USES_LLR)) &&
     fail "BART wave option -b is only valid with LLR regularization (-l)."
 
-mkdir -p "$BART_OUTPUT" "$NIFTI_OUTPUT"
+mkdir -p "$BART_OUTPUT"
+if ((!SKIP_NIFTI)); then
+    mkdir -p "$NIFTI_OUTPUT"
+fi
 
 if [[ "$MAPS_SOURCE" == "bart" ]]; then
     require_cfl_pair "$BART_INPUT/kspace_calib"
@@ -264,7 +281,11 @@ for expected_echo, entry in enumerate(echoes, start=1):
     print(basename)
 PY
 )" || fail "Unable to read echo inputs from manifest.json."
-mapfile -t WAVE_KSPACE_BASENAMES <<<"$MANIFEST_KSPACE_OUTPUT"
+WAVE_KSPACE_BASENAMES=()
+while IFS= read -r WAVE_KSPACE_BASENAME; do
+    [[ -n "$WAVE_KSPACE_BASENAME" ]] &&
+        WAVE_KSPACE_BASENAMES+=("$WAVE_KSPACE_BASENAME")
+done <<<"$MANIFEST_KSPACE_OUTPUT"
 
 for WAVE_KSPACE_NAME in "${WAVE_KSPACE_BASENAMES[@]}"; do
     [[ "$WAVE_KSPACE_NAME" == wave_kspace* ]] ||
@@ -289,23 +310,27 @@ for WAVE_KSPACE_NAME in "${WAVE_KSPACE_BASENAMES[@]}"; do
         "$WAVE_IMAGE"
 done
 
-SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-NIFTI_CONVERTER="$SCRIPT_DIRECTORY/wave_to_nifti.py"
-[[ -f "$NIFTI_CONVERTER" ]] || fail "NIfTI converter not found: $NIFTI_CONVERTER"
+if ((SKIP_NIFTI)); then
+    echo "Completed BART reconstruction; NIfTI conversion was skipped."
+else
+    SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    NIFTI_CONVERTER="$SCRIPT_DIRECTORY/wave_to_nifti.py"
+    [[ -f "$NIFTI_CONVERTER" ]] || fail "NIfTI converter not found: $NIFTI_CONVERTER"
 
-NIFTI_COMMAND=(
-    "$PYTHON_EXECUTABLE" "$NIFTI_CONVERTER"
-    --bart-input-dir "$BART_INPUT"
-    --bart-output-dir "$BART_OUTPUT"
-    --twix "$TWIX_FILE"
-    --seq "$SEQUENCE_FILE"
-    --out "$NIFTI_OUTPUT"
-)
-((SAVE_PHASE)) && NIFTI_COMMAND+=(--save-phase)
-NIFTI_COMMAND+=("${NIFTI_OPTIONS[@]}")
+    NIFTI_COMMAND=(
+        "$PYTHON_EXECUTABLE" "$NIFTI_CONVERTER"
+        --bart-input-dir "$BART_INPUT"
+        --bart-output-dir "$BART_OUTPUT"
+        --twix "$TWIX_FILE"
+        --seq "$SEQUENCE_FILE"
+        --out "$NIFTI_OUTPUT"
+    )
+    ((SAVE_PHASE)) && NIFTI_COMMAND+=(--save-phase)
+    NIFTI_COMMAND+=("${NIFTI_OPTIONS[@]}")
 
-echo "Converting BART output to NIfTI:"
-print_command "${NIFTI_COMMAND[@]}"
-"${NIFTI_COMMAND[@]}"
+    echo "Converting BART output to NIfTI:"
+    print_command "${NIFTI_COMMAND[@]}"
+    "${NIFTI_COMMAND[@]}"
 
-echo "Completed BART reconstruction and NIfTI conversion."
+    echo "Completed BART reconstruction and NIfTI conversion."
+fi

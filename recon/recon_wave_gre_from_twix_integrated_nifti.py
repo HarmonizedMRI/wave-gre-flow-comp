@@ -32,8 +32,9 @@ Output
 ------
 * Coil-compressed multi-echo k-space as a complex NumPy array with shape
   ``(Nx_os, Ny, Nz, Necho, Ncc)``.
-* Reconstructed complex images as one NumPy array with shape
-  ``(Nx_os, Ny, Nz, Necho)``.
+* By default, BART Wave-CAIPI images reconstructed with wavelet/FISTA.
+* With the explicit legacy SENSE backend, reconstructed complex images as one
+  NumPy array with shape ``(Nx_os, Ny, Nz, Necho)``.
 * Optional per-echo complex NumPy files.
 * Optional cropped-readout magnitude and phase NIfTI files, one per echo, with
   JSON sidecars.
@@ -47,6 +48,7 @@ import argparse
 import gc
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -146,6 +148,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reconstruction-backend",
+        "--backend",
+        choices=("bart", "sense"),
+        default="bart",
+        help=(
+            "Reconstruction solver. 'bart' exports Wave-CAIPI inputs and runs "
+            "wavelet/FISTA; 'sense' explicitly selects the legacy local "
+            "CG-SENSE solver."
+        ),
+    )
+    parser.add_argument(
         "--ncc",
         type=int,
         default=12,
@@ -222,8 +235,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--save-bart-inputs",
         action="store_true",
         help=(
-            "Export BART CFL inputs under <out>/bart_inputs[_tag]. This is "
-            "available for wave acquisitions only."
+            "Also export BART CFL inputs when using the SENSE backend. The "
+            "default BART backend always exports them."
         ),
     )
     parser.add_argument(
@@ -407,7 +420,10 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "yflip_override": args.yflip,
         "zflip_override": args.zflip,
         "save_echo_npy": bool(args.save_echo_npy),
-        "save_bart_inputs": bool(args.save_bart_inputs),
+        "reconstruction_backend": args.reconstruction_backend,
+        "save_bart_inputs": bool(
+            args.save_bart_inputs or args.reconstruction_backend == "bart"
+        ),
         "save_nifti": bool(args.save_nifti or args.save_nifti_phase),
         "save_nifti_phase": bool(args.save_nifti_phase),
         "nifti_out_folder": nifti_out,
@@ -2871,6 +2887,63 @@ def save_gre_echo_to_nifti(
 
     return saved
 
+
+def _run_bart_reconstruction(
+    *,
+    bart_input_folder: Path,
+    bart_output_folder: Path,
+    runtime: Mapping[str, Any],
+) -> None:
+    """Run the repository BART wrapper with its wavelet/FISTA defaults."""
+
+    wrapper = Path(__file__).resolve().parent / "bart" / "run_wave_recon.sh"
+    command = [
+        "bash",
+        str(wrapper),
+        "--bart-input",
+        str(bart_input_folder),
+        "--bart-output",
+        str(bart_output_folder),
+        "--maps-source",
+        "bart",
+        "--twix",
+        str(runtime["twix_file"]),
+        "--seq",
+        str(runtime["seq_file"]),
+    ]
+    if not runtime["save_nifti"]:
+        command.append("--skip-nifti")
+    else:
+        command.extend(["--nifti-output", str(runtime["nifti_out_folder"])])
+        if runtime["save_nifti_phase"]:
+            command.append("--save-phase")
+        command.extend(
+            [
+                "--nifti-options",
+                "--nifti-sub",
+                str(runtime["nifti_sub"]),
+                "--nifti-suffix",
+                str(runtime["nifti_suffix"]),
+                "--nifti-axis-roles",
+                *[str(value) for value in runtime["nifti_axis_roles"]],
+                "--nifti-axis-flips",
+                *[
+                    str(bool(value)).lower()
+                    for value in runtime["nifti_axis_flips"]
+                ],
+                "--twix-coord-system",
+                str(runtime["twix_coord_system"]),
+                "--twix-inplane-rot-sign",
+                str(runtime["twix_inplane_rot_sign"]),
+            ]
+        )
+        if runtime["twix_use_fov_for_voxel_size"]:
+            command.append("--twix-use-fov-for-voxel-size")
+        command.append("--end-nifti-options")
+
+    print("Running BART Wave-CAIPI reconstruction with default wavelet/FISTA...")
+    subprocess.run(command, check=True)
+
 # -----------------------------------------------------------------------------
 # Main pipeline
 # -----------------------------------------------------------------------------
@@ -2887,8 +2960,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     image_lines, calib_lines = _split_adc_trajectory(seq, cfg)
     detected_mode = _detect_image_wave_mode(image_lines, cfg)
     mode = _resolve_reconstruction_mode(runtime["mode"], detected_mode)
-    if runtime["save_bart_inputs"] and mode != "wave":
-        raise ValueError("--save-bart-inputs requires a wave acquisition.")
     _print_sequence_summary(cfg, detected_mode=mode)
     nifti_voxel_size_mm = _derive_nifti_voxel_size_mm(cfg)
     print(
@@ -2899,6 +2970,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if runtime["validate_only"]:
         print("Sequence validation completed successfully.")
         return 0
+    if runtime["save_bart_inputs"] and mode != "wave":
+        if runtime["reconstruction_backend"] == "bart":
+            raise ValueError(
+                "The default BART backend requires a wave acquisition. Use "
+                "--reconstruction-backend sense for no-wave data."
+            )
+        raise ValueError("--save-bart-inputs requires a wave acquisition.")
 
     print("Importing GRE image data from integrated TWIX file...")
     img = _normalize_gre_image_data(load_img(str(runtime["twix_file"])), cfg)
@@ -3012,6 +3090,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
             )
             print(f"Saved BART Wave-CAIPI inputs: {manifest_path}")
+            if runtime["reconstruction_backend"] == "bart":
+                bart_output_folder = runtime["out_folder"] / (
+                    "bart_output" + _cache_suffix(runtime["file_tag"])
+                )
+                _run_bart_reconstruction(
+                    bart_input_folder=bart_folder,
+                    bart_output_folder=bart_output_folder,
+                    runtime=runtime,
+                )
+                print(
+                    "Saved BART Wave-CAIPI reconstruction under: "
+                    f"{bart_output_folder}"
+                )
+                print("Reconstruction completed successfully.")
+                return 0
     images = reconstruct_echoes(
         kspace_cc=kspace_cc,
         sens=sens,
