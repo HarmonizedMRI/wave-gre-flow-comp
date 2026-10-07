@@ -12,7 +12,7 @@ dt = sys_wave.gradRasterTime;
 nReadIntervals = round(TreadRaster/dt);
 
 [rampUpWave, nRampUp, T_rampUp, rampUpSlew] = ...
-    makeShortestEndpointRampWave(0, G0, sys_lowPNS);
+    makeShortestEndpointRampWave(0, G0, sys_lowPNS, T_wavePrePad);
 rampUpTmp = mr.makeArbitraryGrad(channel, rampUpWave, ...
     'system', sys_wave, 'first', 0, 'last', G0);
 A_rampUp = rampUpTmp.area;

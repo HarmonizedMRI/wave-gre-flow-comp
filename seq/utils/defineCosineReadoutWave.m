@@ -7,7 +7,8 @@ function [gPreTrap, gWave, totalArea, newCarry, timing, rampUpM1] = defineCosine
     % The cosine readout body contains only the minimum-time 0 -> G0 ramp,
     % the ADC-window cosine, and the explicit G0 -> 0 ramp-down. The M0/carry
     % correction is a separate zero-endpoint trapezoid in the prep module.
-    [rampUpWave, nRampUp, T_rampUp, rampUpSlew] = makeShortestEndpointRampWave(0, G0, sys_lowPNS);
+    [rampUpWave, nRampUp, T_rampUp, rampUpSlew] = ...
+        makeShortestEndpointRampWave(0, G0, sys_lowPNS, T_wavePrePad);
     rampUpTmp = mr.makeArbitraryGrad(channel, rampUpWave, 'system', sys, 'first', 0, 'last', G0);
     A_rampUp = rampUpTmp.area;
 
