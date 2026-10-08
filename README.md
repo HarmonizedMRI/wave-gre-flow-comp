@@ -223,7 +223,8 @@ when the traditional local CG-SENSE solver is required. The companion
 is enabled by default and can be disabled with `--no-save-nifti` in the
 integrated command or `--skip-nifti` in the wrapper. A rerun with the same
 TWIX, sequence, output directory, and tag automatically reuses complete,
-current BART maps and echo images.
+current BART maps and echo images. `--resume` may be passed explicitly; use
+`--no-resume` to force reconstruction.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

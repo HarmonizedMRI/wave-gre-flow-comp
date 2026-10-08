@@ -158,6 +158,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "CG-SENSE solver."
         ),
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        help="Reuse a complete, current BART reconstruction (default).",
+    )
+    resume_group.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Force TWIX preprocessing and BART reconstruction to run again.",
+    )
+    parser.set_defaults(resume=True)
     parser.add_argument(
         "--ncc",
         type=int,
@@ -433,6 +447,7 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "zflip_override": args.zflip,
         "save_echo_npy": bool(args.save_echo_npy),
         "reconstruction_backend": args.reconstruction_backend,
+        "resume": bool(args.resume),
         "save_bart_inputs": bool(
             args.save_bart_inputs or args.reconstruction_backend == "bart"
         ),
@@ -3027,8 +3042,9 @@ def _run_bart_reconstruction(
         str(runtime["twix_file"]),
         "--seq",
         str(runtime["seq_file"]),
-        "--resume",
     ]
+    if runtime["resume"]:
+        command.append("--resume")
     if not runtime["save_nifti"]:
         command.append("--skip-nifti")
     else:
@@ -3102,7 +3118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     bart_output_folder = runtime["out_folder"] / (
         "bart_output" + _cache_suffix(runtime["file_tag"])
     )
-    if runtime["reconstruction_backend"] == "bart" and bart_reconstruction_is_current(
+    if runtime["resume"] and runtime["reconstruction_backend"] == "bart" and bart_reconstruction_is_current(
         bart_folder,
         bart_output_folder,
         source_twix=runtime["twix_file"],
