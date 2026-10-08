@@ -240,6 +240,11 @@ unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
 section is passed unchanged to `bart wave`; the example requests wavelet
 regularization and FISTA. When the section is omitted, the wrapper defaults to
 `-w -f -g`. The helper prints each complete command before running it. Pass
+`--resume` when invoking the wrapper directly to retain complete CFL maps and
+echo images that are at least as new as their BART inputs. The integrated
+reconstruction enables this behavior automatically and, when every echo is
+complete and current relative to the TWIX and sequence, skips TWIX
+preprocessing as well. Pass
 `--skip-nifti` to stop after BART reconstruction. Otherwise, if
 `--nifti-output` is omitted, converted files are written to
 `BART_OUTPUT/nifti`; pass the option only to override that location. Conversion
@@ -396,10 +401,11 @@ are not encoded in the filename, including the ESPIRiT crop threshold.
 
 ## NIfTI export
 
-Enable one magnitude NIfTI plus JSON sidecar per echo with:
+One magnitude NIfTI plus JSON sidecar per echo is enabled by default. Disable
+it with:
 
 ```text
---save-nifti
+--no-save-nifti
 ```
 
 Also export phase in radians with:

@@ -74,7 +74,7 @@ from utils.coil_compression_kspace import (
     estimate_cc_matrix_coillast,
     remove_readout_oversampling_kspace,
 )
-from bart.bart_utils.bart_io import export_wave_inputs
+from bart.bart_utils.bart_io import bart_reconstruction_is_current, export_wave_inputs
 from utils.espirit_calibration import estimate_espirit_maps
 from utils.plot_coil_sens import plot_csm_magnitude_grid, plot_csm_phase_grid
 from utils.psf_coefficient_processing import (
@@ -242,11 +242,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "default BART backend always exports them."
         ),
     )
-    parser.add_argument(
+    nifti_group = parser.add_mutually_exclusive_group()
+    nifti_group.add_argument(
         "--save-nifti",
+        dest="save_nifti",
         action="store_true",
-        help="Save one magnitude NIfTI and JSON sidecar per echo.",
+        help="Save one magnitude NIfTI and JSON sidecar per echo (default).",
     )
+    nifti_group.add_argument(
+        "--no-save-nifti",
+        dest="save_nifti",
+        action="store_false",
+        help="Disable the default NIfTI conversion.",
+    )
+    parser.set_defaults(save_nifti=True)
     parser.add_argument(
         "--save-nifti-phase",
         action="store_true",
@@ -3018,6 +3027,7 @@ def _run_bart_reconstruction(
         str(runtime["twix_file"]),
         "--seq",
         str(runtime["seq_file"]),
+        "--resume",
     ]
     if not runtime["save_nifti"]:
         command.append("--skip-nifti")
@@ -3085,6 +3095,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--reconstruction-backend sense for no-wave data."
             )
         raise ValueError("--save-bart-inputs requires a wave acquisition.")
+
+    bart_folder = runtime["out_folder"] / (
+        "bart_inputs" + _cache_suffix(runtime["file_tag"])
+    )
+    bart_output_folder = runtime["out_folder"] / (
+        "bart_output" + _cache_suffix(runtime["file_tag"])
+    )
+    if runtime["reconstruction_backend"] == "bart" and bart_reconstruction_is_current(
+        bart_folder,
+        bart_output_folder,
+        source_twix=runtime["twix_file"],
+        source_seq=runtime["seq_file"],
+    ):
+        print("Resume: current BART reconstruction is complete; skipping TWIX preprocessing.")
+        _run_bart_reconstruction(
+            bart_input_folder=bart_folder,
+            bart_output_folder=bart_output_folder,
+            runtime=runtime,
+        )
+        print("Resume completed without rerunning BART reconstruction.")
+        return 0
 
     logical_acs = None
     if runtime["reconstruction_backend"] == "bart":
@@ -3193,9 +3224,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "theoretical PSFs",
         )
         if runtime["save_bart_inputs"]:
-            bart_folder = runtime["out_folder"] / (
-                "bart_inputs" + _cache_suffix(runtime["file_tag"])
-            )
             kspace_calib = _build_bart_calibration_kspace(
                 twix_file=runtime["twix_file"],
                 cfg=cfg,
@@ -3211,6 +3239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 psf_calibration=psf_processing_diagnostics,
                 coil_calibration={
                     "source": "integrated refscan set 4",
+                    "source_twix": str(runtime["twix_file"].resolve()),
+                    "source_seq": str(runtime["seq_file"].resolve()),
                     "readout_oversampling_removal": {
                         **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
                         "input_readout": int(cfg["Nx_os"]),
@@ -3223,9 +3253,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"Saved BART Wave-CAIPI inputs: {manifest_path}")
             if runtime["reconstruction_backend"] == "bart":
-                bart_output_folder = runtime["out_folder"] / (
-                    "bart_output" + _cache_suffix(runtime["file_tag"])
-                )
                 _run_bart_reconstruction(
                     bart_input_folder=bart_folder,
                     bart_output_folder=bart_output_folder,

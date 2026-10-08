@@ -212,7 +212,6 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --out /path/to/reconstruction \
     --wave-mode auto \
     --espirit-device auto \
-    --save-nifti \
     --save-nifti-phase
 ```
 
@@ -221,7 +220,10 @@ in BART CFL format by default. They skip SigPy ESPIRiT, run BART `ecalib`, and
 then run GPU wavelet/FISTA reconstruction. Select `--reconstruction-backend sense` only
 when the traditional local CG-SENSE solver is required. The companion
 `recon/bart/run_wave_recon.sh` can also be run independently. NIfTI conversion
-can be skipped with `--skip-nifti`.
+is enabled by default and can be disabled with `--no-save-nifti` in the
+integrated command or `--skip-nifti` in the wrapper. A rerun with the same
+TWIX, sequence, output directory, and tag automatically reuses complete,
+current BART maps and echo images.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

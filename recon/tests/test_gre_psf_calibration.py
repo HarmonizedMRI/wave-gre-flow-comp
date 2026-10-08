@@ -289,6 +289,21 @@ class GrePsfCalibrationTests(unittest.TestCase):
             self.assertIsNone(default["psf_fit_kx_max"])
             self.assertEqual(default["reconstruction_backend"], "bart")
             self.assertTrue(default["save_bart_inputs"])
+            self.assertTrue(default["save_nifti"])
+
+            no_nifti = native._collect_runtime_config(
+                [
+                    "--twix",
+                    str(root / "input.dat"),
+                    "--seq",
+                    str(sequence),
+                    "--out",
+                    str(root / "no-nifti"),
+                    "--validate-only",
+                    "--no-save-nifti",
+                ]
+            )
+            self.assertFalse(no_nifti["save_nifti"])
 
             automatic = native._collect_runtime_config(
                 [

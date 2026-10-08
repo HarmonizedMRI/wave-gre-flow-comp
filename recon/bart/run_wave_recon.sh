@@ -17,6 +17,7 @@ Usage:
     [--existing-maps CFL_BASENAME] \
     [--save-phase] \
     [--skip-nifti] \
+    [--resume] \
     [--ecalib-options BART_OPTIONS... --end-ecalib-options] \
     [--wave-options BART_OPTIONS... --end-wave-options] \
     [--nifti-options OPTIONS... --end-nifti-options]
@@ -36,6 +37,7 @@ Optional wrapper arguments:
   --save-phase            Also write phase NIfTI files.
   --skip-nifti            Stop after BART reconstruction without converting
                           the output to NIfTI.
+  --resume                Reuse current, complete BART maps and echo images.
   -h, --help              Show this help.
 
 Direct option sections:
@@ -106,6 +108,21 @@ require_cfl_pair() {
         fail "Missing BART CFL pair: $1.{hdr,cfl}"
 }
 
+cfl_pair_is_current() {
+    local output="$1"
+    shift
+    [[ -s "$output.hdr" && -s "$output.cfl" ]] || return 1
+    local input
+    for input in "$@"; do
+        [[ -f "$input.hdr" && -f "$input.cfl" ]] || return 1
+        [[ ! "$input.hdr" -nt "$output.hdr" ]] || return 1
+        [[ ! "$input.hdr" -nt "$output.cfl" ]] || return 1
+        [[ ! "$input.cfl" -nt "$output.hdr" ]] || return 1
+        [[ ! "$input.cfl" -nt "$output.cfl" ]] || return 1
+    done
+    return 0
+}
+
 strip_cfl_extension() {
     local path="$1"
     path="${path%.hdr}"
@@ -138,6 +155,7 @@ SEQUENCE_FILE=""
 NIFTI_OUTPUT=""
 SAVE_PHASE=0
 SKIP_NIFTI=0
+RESUME=0
 ECALIB_OPTIONS=()
 WAVE_OPTIONS=()
 NIFTI_OPTIONS=()
@@ -162,6 +180,8 @@ while (($#)); do
             SAVE_PHASE=1; shift ;;
         --skip-nifti)
             SKIP_NIFTI=1; shift ;;
+        --resume)
+            RESUME=1; shift ;;
         --ecalib-options)
             shift
             while (($#)) && [[ "$1" != "--end-ecalib-options" ]]; do
@@ -249,14 +269,19 @@ if [[ "$MAPS_SOURCE" == "bart" ]]; then
     require_cfl_pair "$BART_INPUT/kspace_calib"
     ESPIRIT_MAPS="$BART_OUTPUT/coil_sens_bart"
 
-    echo "Running BART ESPIRiT calibration:"
-    print_command \
-        "$BART_EXECUTABLE" ecalib -m 1 "${ECALIB_OPTIONS[@]}" \
-        "$BART_INPUT/kspace_calib" "$ESPIRIT_MAPS"
+    if ((RESUME)) && cfl_pair_is_current \
+        "$ESPIRIT_MAPS" "$BART_INPUT/kspace_calib"; then
+        echo "Resume: reusing current BART ESPIRiT maps: $ESPIRIT_MAPS"
+    else
+        echo "Running BART ESPIRiT calibration:"
+        print_command \
+            "$BART_EXECUTABLE" ecalib -m 1 "${ECALIB_OPTIONS[@]}" \
+            "$BART_INPUT/kspace_calib" "$ESPIRIT_MAPS"
 
-    "$BART_EXECUTABLE" ecalib -m 1 "${ECALIB_OPTIONS[@]}" \
-        "$BART_INPUT/kspace_calib" \
-        "$ESPIRIT_MAPS"
+        "$BART_EXECUTABLE" ecalib -m 1 "${ECALIB_OPTIONS[@]}" \
+            "$BART_INPUT/kspace_calib" \
+            "$ESPIRIT_MAPS"
+    fi
 else
     [[ -n "$EXISTING_MAPS" ]] || EXISTING_MAPS="$BART_INPUT/coil_sens"
     ESPIRIT_MAPS="$(strip_cfl_extension "$EXISTING_MAPS")"
@@ -299,16 +324,21 @@ for WAVE_KSPACE_NAME in "${WAVE_KSPACE_BASENAMES[@]}"; do
     require_cfl_pair "$WAVE_KSPACE"
     require_cfl_pair "$WAVE_PSF"
 
-    echo "Running BART Wave-CAIPI reconstruction (${ECHO_SUFFIX:-single echo}):"
-    print_command \
-        "$BART_EXECUTABLE" wave "${WAVE_OPTIONS[@]}" \
-        "$ESPIRIT_MAPS" "$WAVE_PSF" "$WAVE_KSPACE" "$WAVE_IMAGE"
+    if ((RESUME)) && cfl_pair_is_current \
+        "$WAVE_IMAGE" "$ESPIRIT_MAPS" "$WAVE_PSF" "$WAVE_KSPACE"; then
+        echo "Resume: reusing current BART image (${ECHO_SUFFIX:-single echo}): $WAVE_IMAGE"
+    else
+        echo "Running BART Wave-CAIPI reconstruction (${ECHO_SUFFIX:-single echo}):"
+        print_command \
+            "$BART_EXECUTABLE" wave "${WAVE_OPTIONS[@]}" \
+            "$ESPIRIT_MAPS" "$WAVE_PSF" "$WAVE_KSPACE" "$WAVE_IMAGE"
 
-    "$BART_EXECUTABLE" wave "${WAVE_OPTIONS[@]}" \
-        "$ESPIRIT_MAPS" \
-        "$WAVE_PSF" \
-        "$WAVE_KSPACE" \
-        "$WAVE_IMAGE"
+        "$BART_EXECUTABLE" wave "${WAVE_OPTIONS[@]}" \
+            "$ESPIRIT_MAPS" \
+            "$WAVE_PSF" \
+            "$WAVE_KSPACE" \
+            "$WAVE_IMAGE"
+    fi
 done
 
 if ((SKIP_NIFTI)); then

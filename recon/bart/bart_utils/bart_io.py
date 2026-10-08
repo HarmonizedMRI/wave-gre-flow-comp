@@ -73,6 +73,95 @@ def read_cfl(path: str | Path, *, trim_trailing_singletons: bool = True) -> np.n
     return array
 
 
+def _cfl_pair_times(path: str | Path) -> tuple[int, int] | None:
+    """Return earliest/latest pair mtimes after validating dimensions and size."""
+
+    base = _cfl_base(path)
+    header = base.with_suffix(".hdr")
+    data = base.with_suffix(".cfl")
+    if not header.is_file() or not data.is_file():
+        return None
+    dimension_line = next(
+        (
+            line.strip()
+            for line in header.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ),
+        None,
+    )
+    if dimension_line is None:
+        return None
+    try:
+        shape = tuple(int(value) for value in dimension_line.split())
+    except ValueError:
+        return None
+    if not shape or any(size < 1 for size in shape):
+        return None
+    expected_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(np.complex64).itemsize
+    if data.stat().st_size != expected_bytes:
+        return None
+    mtimes = (header.stat().st_mtime_ns, data.stat().st_mtime_ns)
+    return min(mtimes), max(mtimes)
+
+
+def bart_reconstruction_is_current(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    source_twix: str | Path,
+    source_seq: str | Path,
+) -> bool:
+    """Return true when BART maps and every manifest echo are complete/current."""
+
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    twix_path = Path(source_twix).resolve()
+    seq_path = Path(source_seq).resolve()
+    try:
+        manifest = json.loads(
+            (input_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        provenance = manifest.get("coil_calibration", {})
+        if provenance.get("source_twix") != str(twix_path):
+            return False
+        if provenance.get("source_seq") != str(seq_path):
+            return False
+        source_latest = max(twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns)
+        calib_times = _cfl_pair_times(input_path / "kspace_calib")
+        maps_times = _cfl_pair_times(output_path / "coil_sens_bart")
+        if calib_times is None or maps_times is None:
+            return False
+        if maps_times[0] < max(source_latest, calib_times[1]):
+            return False
+        echoes = manifest.get("echoes")
+        if not isinstance(echoes, list) or not echoes:
+            return False
+        for entry in echoes:
+            kspace_name = entry.get("wave_kspace")
+            psf_name = entry.get("psf")
+            if not isinstance(kspace_name, str) or not isinstance(psf_name, str):
+                return False
+            if not kspace_name.startswith("wave_kspace"):
+                return False
+            suffix = kspace_name[len("wave_kspace") :]
+            kspace_times = _cfl_pair_times(input_path / kspace_name)
+            psf_times = _cfl_pair_times(input_path / psf_name)
+            image_times = _cfl_pair_times(output_path / f"image_wave{suffix}")
+            if kspace_times is None or psf_times is None or image_times is None:
+                return False
+            newest_input = max(
+                source_latest,
+                maps_times[1],
+                kspace_times[1],
+                psf_times[1],
+            )
+            if image_times[0] < newest_input:
+                return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def _complex64(name: str, array: Any, ndim: int) -> np.ndarray:
     result = np.asarray(array, dtype=np.complex64)
     if result.ndim != ndim or any(int(size) < 1 for size in result.shape):

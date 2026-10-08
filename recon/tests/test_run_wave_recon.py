@@ -208,6 +208,29 @@ set -euo pipefail
         self.assertIn("GPU wavelet/FISTA defaults: -w -f -g", result.stdout)
         self.assertIn("NIfTI conversion was skipped", result.stdout)
 
+    def test_resume_skips_current_maps_and_image(self) -> None:
+        command = self._base_command("bart") + ["--skip-nifti"]
+        subprocess.run(
+            command,
+            check=True,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+        self.bart_log.unlink()
+
+        result = subprocess.run(
+            command + ["--resume"],
+            check=True,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertFalse(self.bart_log.exists())
+        self.assertIn("Resume: reusing current BART ESPIRiT maps", result.stdout)
+        self.assertIn("Resume: reusing current BART image", result.stdout)
+
     def test_rejects_wavelet_and_llr_together(self) -> None:
         command = self._base_command("existing") + [
             "--wave-options",

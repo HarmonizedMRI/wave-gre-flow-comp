@@ -7,7 +7,12 @@ from pathlib import Path
 
 import numpy as np
 
-from recon.bart.bart_utils.bart_io import export_wave_inputs, read_cfl, write_cfl
+from recon.bart.bart_utils.bart_io import (
+    bart_reconstruction_is_current,
+    export_wave_inputs,
+    read_cfl,
+    write_cfl,
+)
 
 
 def _read_cfl(base: Path) -> np.ndarray:
@@ -15,6 +20,41 @@ def _read_cfl(base: Path) -> np.ndarray:
 
 
 class BartIoTests(unittest.TestCase):
+    def test_complete_reconstruction_is_current_and_truncation_invalidates_it(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            twix = root / "input.dat"
+            sequence = root / "input.seq"
+            twix.touch()
+            sequence.touch()
+            export_wave_inputs(
+                inputs,
+                wave_kspace=np.ones((8, 3, 2, 1, 2), np.complex64),
+                calibrated_psf=np.ones((1, 8, 3, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+                coil_calibration={
+                    "source_twix": str(twix.resolve()),
+                    "source_seq": str(sequence.resolve()),
+                },
+            )
+            write_cfl(outputs / "coil_sens_bart", np.ones((4, 3, 2, 2), np.complex64))
+            image = write_cfl(outputs / "image_wave", np.ones((4, 3, 2), np.complex64))
+
+            self.assertTrue(
+                bart_reconstruction_is_current(
+                    inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
+            image.with_suffix(".cfl").write_bytes(b"\x00" * 8)
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
+
     def test_write_cfl_round_trip_preserves_column_major_order(self) -> None:
         expected = (
             np.arange(24, dtype=np.float32).reshape(2, 3, 4)
