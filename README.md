@@ -74,12 +74,16 @@ A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compa
 <!-- ESPIRIT-SLICE2D-README -->
 ## ESPIRiT calibration modes
 
-The reconstruction supports two sensitivity-map calibration backends:
+The explicit `--reconstruction-backend sense` path supports two SigPy
+sensitivity-map calibration modes:
 
 - `--espirit-calib-mode 3d` is the native SigPy 3D method and remains the default/reference. It can use `--espirit-device auto`, `cpu`, or `gpu`.
 - `--espirit-calib-mode slice2d` removes readout oversampling first, transforms logical readout to hybrid space, and runs independent 2D ESPIRiT calibrations across the joint LIN-PAR plane. It is CPU-only and is useful when native 3D CPU calibration is too slow or memory-intensive.
 
-`--espirit-crop` applies to both modes. A practical tested range is **0.8–0.9**: use `0.8` for broader low-SNR support and `0.9` for a stricter map-support mask.
+The top-level `--espirit-crop` also configures `bart ecalib -c` when using the
+default BART backend. On the explicit SENSE backend it applies to both SigPy
+modes. A practical tested range is **0.8–0.9**: use `0.8` for broader low-SNR
+support and `0.9` for a stricter map-support mask.
 
 For `slice2d`, omit `--espirit-cpu-workers` to use Joblib's available physical-core count automatically, or set an explicit limit on shared systems. For example:
 
@@ -89,6 +93,7 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --seq /path/to/matching_wave_gre.seq \
     --out /path/to/reconstruction \
     --wave-mode auto \
+    --reconstruction-backend sense \
     --espirit-calib-mode slice2d \
     --espirit-device cpu \
     --espirit-crop 0.8 \
@@ -229,6 +234,19 @@ source-path provenance are validated and upgraded in place on their first
 resumed run.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
+
+For lightweight sensitivity-support inspection without TWIX or sequence
+metadata, convert BART maps in unchanged logical axis order:
+
+```bash
+python recon/bart/csm_to_nifti_local.py \
+  --csm /path/to/coil_sens_bart \
+  --out /path/to/coil_sens_bart_rss.nii.gz \
+  --voxel-size 0.64 0.64 0.64
+```
+
+This diagnostic NIfTI uses a synthetic affine and must not be interpreted as
+having correct anatomical orientation.
 
 Force a fully CPU-capable run:
 

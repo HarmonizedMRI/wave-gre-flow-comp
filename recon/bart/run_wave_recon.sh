@@ -15,6 +15,7 @@ Usage:
     --seq FILE.seq \
     [--nifti-output PATH] \
     [--existing-maps CFL_BASENAME] \
+    [--espirit-crop VALUE] \
     [--save-phase] \
     [--skip-nifti] \
     [--resume] \
@@ -34,6 +35,8 @@ Optional wrapper arguments:
                           BART_OUTPUT/nifti.
   --existing-maps BASE    Existing ESPIRiT CFL basename. Defaults to
                           BART_INPUT/coil_sens with --maps-source existing.
+  --espirit-crop VALUE    BART ecalib eigenvalue crop threshold. Default: the
+                          BART default (currently 0.8). Requires maps-source bart.
   --save-phase            Also write phase NIfTI files.
   --skip-nifti            Stop after BART reconstruction without converting
                           the output to NIfTI.
@@ -73,7 +76,7 @@ Example using BART ecalib and wavelet/FISTA reconstruction:
     --maps-source bart \
     --twix ./meas.dat \
     --seq ./sequence.seq \
-    --ecalib-options -c 0.8 --end-ecalib-options \
+    --espirit-crop 0.8 \
     --wave-options -w -r 0.001 -f -i 100 -t 1e-6 --end-wave-options
 
 Example using existing maps and LLR/FISTA reconstruction:
@@ -156,6 +159,7 @@ NIFTI_OUTPUT=""
 SAVE_PHASE=0
 SKIP_NIFTI=0
 RESUME=0
+ESPIRIT_CROP=""
 ECALIB_OPTIONS=()
 WAVE_OPTIONS=()
 NIFTI_OPTIONS=()
@@ -176,6 +180,8 @@ while (($#)); do
             require_value "$1" "${2:-}"; SEQUENCE_FILE="$2"; shift 2 ;;
         --nifti-output)
             require_value "$1" "${2:-}"; NIFTI_OUTPUT="${2%/}"; shift 2 ;;
+        --espirit-crop)
+            require_value "$1" "${2:-}"; ESPIRIT_CROP="$2"; shift 2 ;;
         --save-phase)
             SAVE_PHASE=1; shift ;;
         --skip-nifti)
@@ -239,6 +245,15 @@ fi
 # A second -m could conflict with the visible, required one-map setting below.
 array_contains -m "${ECALIB_OPTIONS[@]}" &&
     fail "Do not pass -m in --ecalib-options; this workflow explicitly uses -m 1."
+if [[ -n "$ESPIRIT_CROP" ]]; then
+    [[ "$MAPS_SOURCE" == "bart" ]] ||
+        fail "--espirit-crop requires --maps-source bart."
+    [[ "$ESPIRIT_CROP" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]] ||
+        fail "--espirit-crop must be a finite value between 0 and 1."
+    array_contains -c "${ECALIB_OPTIONS[@]}" &&
+        fail "Do not combine --espirit-crop with -c in --ecalib-options."
+    ECALIB_OPTIONS=(-c "$ESPIRIT_CROP" "${ECALIB_OPTIONS[@]}")
+fi
 
 if ((${#WAVE_OPTIONS[@]} == 0)); then
     WAVE_OPTIONS=(-w -f -g)

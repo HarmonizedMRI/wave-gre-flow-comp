@@ -103,9 +103,11 @@ set -euo pipefail
     def test_forwards_original_bart_options_and_runs_conversion(self) -> None:
         command = self._base_command("bart") + [
             "--save-phase",
-            "--ecalib-options",
-            "-c",
+            "--espirit-crop",
             "0.85",
+            "--ecalib-options",
+            "-t",
+            "0.002",
             "--end-ecalib-options",
             "--wave-options",
             "-w",
@@ -133,6 +135,8 @@ set -euo pipefail
                 "1",
                 "-c",
                 "0.85",
+                "-t",
+                "0.002",
                 str(self.bart_input / "kspace_calib"),
                 str(self.bart_output / "coil_sens_bart"),
             ],
@@ -247,6 +251,52 @@ set -euo pipefail
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("-w and -l are mutually exclusive", result.stderr)
+
+    def test_rejects_duplicate_ecalib_crop_sources(self) -> None:
+        """The first-class crop option must not conflict with raw ecalib flags."""
+        command = self._base_command("bart") + [
+            "--espirit-crop",
+            "0.5",
+            "--ecalib-options",
+            "-c",
+            "0.8",
+            "--end-ecalib-options",
+        ]
+        result = subprocess.run(
+            command,
+            check=False,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Do not combine --espirit-crop with -c", result.stderr)
+
+    def test_rejects_crop_when_using_existing_maps(self) -> None:
+        """Crop cannot affect maps supplied through maps-source existing."""
+        command = self._base_command("existing") + ["--espirit-crop", "0.5"]
+        result = subprocess.run(
+            command,
+            check=False,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--espirit-crop requires --maps-source bart", result.stderr)
+
+    def test_rejects_invalid_ecalib_crop(self) -> None:
+        """The wrapper should reject crop thresholds outside [0, 1]."""
+        command = self._base_command("bart") + ["--espirit-crop", "1.1"]
+        result = subprocess.run(
+            command,
+            check=False,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("finite value between 0 and 1", result.stderr)
 
 
 if __name__ == "__main__":

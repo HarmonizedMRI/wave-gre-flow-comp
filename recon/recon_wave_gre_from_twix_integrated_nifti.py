@@ -203,8 +203,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.8,
         help=(
-            "ESPIRiT eigenvalue crop threshold. Lower values generally retain "
-            "a larger sensitivity-map support region."
+            "ESPIRiT eigenvalue crop threshold for BART ecalib (default "
+            "backend) or SigPy (explicit SENSE backend). Lower values "
+            "generally retain a larger sensitivity-map support region."
         ),
     )
     parser.add_argument(
@@ -3020,6 +3021,24 @@ def save_gre_echo_to_nifti(
     return saved
 
 
+def _bart_coil_calibration_provenance(espirit_crop: float) -> dict[str, Any]:
+    """Return the BART sensitivity-estimation identity used for safe resume.
+
+    Args:
+        espirit_crop: BART ecalib eigenvalue crop threshold.
+
+    Returns:
+        Manifest fields that identify the BART map-calibration settings.
+    """
+
+    return {
+        "bart_ecalib": {
+            "maps": 1,
+            "crop": float(espirit_crop),
+        }
+    }
+
+
 def _run_bart_reconstruction(
     *,
     bart_input_folder: Path,
@@ -3042,6 +3061,8 @@ def _run_bart_reconstruction(
         str(runtime["twix_file"]),
         "--seq",
         str(runtime["seq_file"]),
+        "--espirit-crop",
+        f"{float(runtime['espirit_crop']):g}",
     ]
     if runtime["resume"]:
         command.append("--resume")
@@ -3123,6 +3144,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         bart_output_folder,
         source_twix=runtime["twix_file"],
         source_seq=runtime["seq_file"],
+        expected_coil_calibration=_bart_coil_calibration_provenance(
+            runtime["espirit_crop"]
+        ),
+        allow_legacy_provenance=np.isclose(runtime["espirit_crop"], 0.8),
     ):
         print("Resume: current BART reconstruction is complete; skipping TWIX preprocessing.")
         _run_bart_reconstruction(
@@ -3257,6 +3282,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "source": "integrated refscan set 4",
                     "source_twix": str(runtime["twix_file"].resolve()),
                     "source_seq": str(runtime["seq_file"].resolve()),
+                    **(
+                        _bart_coil_calibration_provenance(runtime["espirit_crop"])
+                        if runtime["reconstruction_backend"] == "bart"
+                        else {}
+                    ),
                     "readout_oversampling_removal": {
                         **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
                         "input_readout": int(cfg["Nx_os"]),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -110,8 +110,28 @@ def bart_reconstruction_is_current(
     *,
     source_twix: str | Path,
     source_seq: str | Path,
+    expected_coil_calibration: Mapping[str, Any] | None = None,
+    allow_legacy_provenance: bool = True,
 ) -> bool:
-    """Return true when BART maps and every manifest echo are complete/current."""
+    """Return true when BART maps and every manifest echo are complete/current.
+
+    Args:
+        input_dir: Directory containing the BART input manifest and CFL pairs.
+        output_dir: Directory containing BART maps and reconstructed images.
+        source_twix: TWIX source that must match recorded provenance.
+        source_seq: Pulseq source that must match recorded provenance.
+        expected_coil_calibration: Optional required coil-calibration fields.
+        allow_legacy_provenance: Permit complete manifests without recorded
+            source paths. Disable this when a non-default setting cannot be
+            safely inferred for legacy outputs.
+
+    Returns:
+        True only when provenance, timestamps, dimensions, and CFL byte counts
+        show that every required output is reusable.
+
+    Side Effects:
+        Accepted legacy manifests are upgraded in place when writable.
+    """
 
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -121,12 +141,23 @@ def bart_reconstruction_is_current(
     legacy_provenance = False
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, Mapping):
+            return False
         provenance = manifest.get("coil_calibration", {})
+        if not isinstance(provenance, Mapping):
+            return False
         recorded_twix = provenance.get("source_twix")
         recorded_seq = provenance.get("source_seq")
         legacy_provenance = recorded_twix is None and recorded_seq is None
+        if legacy_provenance and not allow_legacy_provenance:
+            return False
         if not legacy_provenance:
             if recorded_twix != str(twix_path) or recorded_seq != str(seq_path):
+                return False
+            if expected_coil_calibration is not None and any(
+                provenance.get(key) != value
+                for key, value in expected_coil_calibration.items()
+            ):
                 return False
         source_latest = max(twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns)
         calib_times = _cfl_pair_times(input_path / "kspace_calib")
@@ -170,6 +201,8 @@ def bart_reconstruction_is_current(
                 "source_provenance": "inferred-from-complete-current-legacy-outputs",
             }
         )
+        if expected_coil_calibration is not None:
+            upgraded_provenance.update(dict(expected_coil_calibration))
         manifest["coil_calibration"] = upgraded_provenance
         try:
             manifest_path.write_text(

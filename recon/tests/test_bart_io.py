@@ -41,7 +41,13 @@ class BartIoTests(unittest.TestCase):
 
             self.assertTrue(
                 bart_reconstruction_is_current(
-                    inputs, outputs, source_twix=twix, source_seq=sequence
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration={
+                        "bart_ecalib": {"maps": 1, "crop": 0.8}
+                    },
                 )
             )
             provenance = json.loads(manifest_path.read_text(encoding="utf-8"))[
@@ -52,6 +58,85 @@ class BartIoTests(unittest.TestCase):
             self.assertEqual(
                 provenance["source_provenance"],
                 "inferred-from-complete-current-legacy-outputs",
+            )
+            self.assertEqual(
+                provenance["bart_ecalib"], {"maps": 1, "crop": 0.8}
+            )
+
+    def test_nondefault_crop_rejects_legacy_manifest_without_provenance(self) -> None:
+        """A non-default crop cannot be inferred from a legacy manifest."""
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            twix = root / "input.dat"
+            sequence = root / "input.seq"
+            twix.touch()
+            sequence.touch()
+            export_wave_inputs(
+                inputs,
+                wave_kspace=np.ones((8, 3, 2, 1, 2), np.complex64),
+                calibrated_psf=np.ones((1, 8, 3, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+            )
+            write_cfl(
+                outputs / "coil_sens_bart", np.ones((4, 3, 2, 2), np.complex64)
+            )
+            write_cfl(outputs / "image_wave", np.ones((4, 3, 2), np.complex64))
+
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration={
+                        "bart_ecalib": {"maps": 1, "crop": 0.5}
+                    },
+                    allow_legacy_provenance=False,
+                )
+            )
+
+    def test_modern_manifest_rejects_different_bart_crop(self) -> None:
+        """Resume must not reuse maps calibrated with a different crop."""
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            twix = root / "input.dat"
+            sequence = root / "input.seq"
+            twix.touch()
+            sequence.touch()
+            export_wave_inputs(
+                inputs,
+                wave_kspace=np.ones((8, 3, 2, 1, 2), np.complex64),
+                calibrated_psf=np.ones((1, 8, 3, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+                coil_calibration={
+                    "source_twix": str(twix.resolve()),
+                    "source_seq": str(sequence.resolve()),
+                    "bart_ecalib": {"maps": 1, "crop": 0.8},
+                },
+            )
+            write_cfl(
+                outputs / "coil_sens_bart", np.ones((4, 3, 2, 2), np.complex64)
+            )
+            write_cfl(outputs / "image_wave", np.ones((4, 3, 2), np.complex64))
+
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration={
+                        "bart_ecalib": {"maps": 1, "crop": 0.5}
+                    },
+                )
             )
 
     def test_complete_reconstruction_is_current_and_truncation_invalidates_it(self) -> None:

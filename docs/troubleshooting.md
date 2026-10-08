@@ -139,12 +139,20 @@ Omitting `--espirit-cpu-workers` enables automatic physical-core selection. On a
 
 ### Crop support is too small or too broad
 
-`--espirit-crop` remains active in both `3d` and `slice2d`. A practical initial range is 0.8–0.9:
+`--espirit-crop` configures `bart ecalib` on the default backend and remains
+active in both `3d` and `slice2d` modes on the explicit SENSE backend. A
+practical initial range is 0.8–0.9:
 
 - lower toward `0.8` for broader low-SNR support;
 - higher toward `0.9` for a stricter support mask.
 
-Change one parameter at a time and inspect CSM magnitude/phase plots and the final reconstruction. When testing a new crop, rerun without `--reuse-coil-calib`; crop is applied during calibration and is not reapplied to cached maps.
+Change one parameter at a time and inspect CSM magnitude/phase plots and the
+final reconstruction. The integrated BART path stores the crop in its manifest
+and invalidates resume when the requested value changes. On the SENSE backend,
+rerun without `--reuse-coil-calib`; crop is applied during calibration and is
+not reapplied to cached maps. When calling `recon/bart/run_wave_recon.sh`
+directly, pass `--espirit-crop VALUE` and do not also pass `-c` inside
+`--ecalib-options`.
 
 ### Slice2d worker failure or excessive memory use
 

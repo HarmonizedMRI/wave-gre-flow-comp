@@ -161,12 +161,18 @@ two phase-encoding dimensions.
 
 `slice2d` is CPU-only. `--espirit-device auto` and `cpu` are accepted; explicit `gpu` is rejected. Native `3d` remains the method to use for GPU calibration and the reference for method comparisons.
 
-`--espirit-crop` is passed directly to SigPy in both modes. Testing in the associated Wave-MPRAGE workflow found **0.8–0.9** to be a reasonable practical range, and the same range is recommended as the initial GRE range:
+The top-level `--espirit-crop` is passed to `bart ecalib -c` for the default
+BART backend and directly to SigPy in both calibration modes of the explicit
+SENSE backend. Testing in the associated Wave-MPRAGE workflow found
+**0.8–0.9** to be a reasonable practical range, and the same range is
+recommended as the initial GRE range:
 
 - `0.8`: broader sensitivity support, including more low-SNR anatomy;
 - `0.9`: stricter support with more background suppression.
 
-Changing crop requires recalculating maps. Do not use `--reuse-coil-calib` when evaluating a new crop value.
+Changing crop requires recalculating maps. BART resume records the crop in
+`manifest.json` and refuses to reuse maps produced with a different value. On
+the SENSE backend, do not use `--reuse-coil-calib` when evaluating a new crop.
 
 When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-core count and limits it by the number of logical-RO slices. An explicit value is useful on a shared node or when memory bandwidth limits scaling. Start conservatively, then benchmark; using every logical CPU is not necessarily fastest.
 
@@ -181,7 +187,7 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--espirit-device {auto,cpu,gpu}` | `auto` | Select ESPIRiT execution device |
 | `--espirit-gpu-index N` | `0` | Select CUDA GPU index |
 | `--espirit-calib-mode {3d,slice2d}` | `3d` | Select native 3D or CPU-parallel slice2d ESPIRiT |
-| `--espirit-crop VALUE` | `0.8` | Set ESPIRiT eigenvalue support crop; practical initial range 0.8–0.9 |
+| `--espirit-crop VALUE` | `0.8` | Set BART or SigPy ESPIRiT eigenvalue support crop; practical initial range 0.8–0.9 |
 | `--espirit-cpu-workers N` | automatic | Limit slice2d process workers |
 | `--cg-iters N` | `50` | Maximum CG iterations |
 | `--cg-tol VALUE` | `1e-6` | Relative CG stopping tolerance |
@@ -231,12 +237,14 @@ recon/bart/run_wave_recon.sh \
     --twix /path/to/meas_wave_gre.dat \
     --seq /path/to/matching_wave_gre.seq \
     --save-phase \
-    --ecalib-options -c 0.8 --end-ecalib-options \
+    --espirit-crop 0.8 \
     --wave-options -w -r 0.001 -f -i 100 -t 1e-6 --end-wave-options
 ```
 
-The flags between `--ecalib-options` and `--end-ecalib-options` are passed
-unchanged to `bart ecalib`. Likewise, everything in the `--wave-options`
+The wrapper's `--espirit-crop VALUE` is passed to `bart ecalib -c VALUE` and
+cannot be combined with `-c` inside the raw option section. Other flags between
+`--ecalib-options` and `--end-ecalib-options` are passed unchanged to
+`bart ecalib`. Likewise, everything in the `--wave-options`
 section is passed unchanged to `bart wave`; the example requests wavelet
 regularization and FISTA. When the section is omitted, the wrapper defaults to
 `-w -f -g`. The helper prints each complete command before running it. Pass
@@ -271,6 +279,20 @@ k-space norm removed internally by `bart wave`, applies one echo-1 magnitude
 scale to every echo, and does not crop BART's already de-oversampled readout.
 Use `--help` for every supported BART wave flag and the optional direct NIfTI
 option section. Set `BART_BIN` when the executable is not named `bart`.
+
+For CSM support inspection when anatomical orientation is not required, use
+the lightweight converter without TWIX or sequence inputs:
+
+```bash
+python recon/bart/csm_to_nifti_local.py \
+  --csm /path/to/coil_sens_bart \
+  --out /path/to/coil_sens_bart_rss.nii.gz \
+  --voxel-size 0.64 0.64 0.64
+```
+
+It writes RSS magnitude in unchanged logical `(RO, LIN, PAR)` order with a
+synthetic affine. Use the normal BART reconstruction converter when NIfTI
+orientation must match the TWIX geometry.
 
 ## PSF coefficient processing
 

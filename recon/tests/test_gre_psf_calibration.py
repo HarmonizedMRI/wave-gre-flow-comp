@@ -37,6 +37,28 @@ def _quality(length: int) -> dict[str, dict[str, np.ndarray]]:
 
 
 class GrePsfCalibrationTests(unittest.TestCase):
+    def test_integrated_bart_command_forwards_espirit_crop(self) -> None:
+        """The integrated BART backend must pass its crop to the wrapper."""
+
+        runtime = {
+            "twix_file": Path("/tmp/input.dat"),
+            "seq_file": Path("/tmp/input.seq"),
+            "espirit_crop": 0.5,
+            "resume": False,
+            "save_nifti": False,
+        }
+        with patch.object(native.subprocess, "run") as run:
+            native._run_bart_reconstruction(
+                bart_input_folder=Path("/tmp/bart_inputs"),
+                bart_output_folder=Path("/tmp/bart_output"),
+                runtime=runtime,
+            )
+
+        command = run.call_args.args[0]
+        crop_index = command.index("--espirit-crop")
+        self.assertEqual(command[crop_index + 1], "0.5")
+        run.assert_called_once_with(command, check=True)
+
     def test_config_separates_measured_counts_from_global_label_extents(self) -> None:
         """Sparse global LIN/PAR labels must retain their mapVBVD extents."""
 
@@ -288,6 +310,7 @@ class GrePsfCalibrationTests(unittest.TestCase):
             self.assertIsNone(default["psf_fit_kx_min"])
             self.assertIsNone(default["psf_fit_kx_max"])
             self.assertEqual(default["reconstruction_backend"], "bart")
+            self.assertEqual(default["espirit_crop"], 0.8)
             self.assertTrue(default["resume"])
             self.assertTrue(default["save_bart_inputs"])
             self.assertTrue(default["save_nifti"])
@@ -319,6 +342,21 @@ class GrePsfCalibrationTests(unittest.TestCase):
                 ]
             )
             self.assertFalse(no_resume["resume"])
+
+            custom_crop = native._collect_runtime_config(
+                [
+                    "--twix",
+                    str(root / "input.dat"),
+                    "--seq",
+                    str(sequence),
+                    "--out",
+                    str(root / "custom-crop"),
+                    "--validate-only",
+                    "--espirit-crop",
+                    "0.5",
+                ]
+            )
+            self.assertEqual(custom_crop["espirit_crop"], 0.5)
 
             automatic = native._collect_runtime_config(
                 [
