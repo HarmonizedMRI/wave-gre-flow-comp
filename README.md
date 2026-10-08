@@ -224,7 +224,9 @@ is enabled by default and can be disabled with `--no-save-nifti` in the
 integrated command or `--skip-nifti` in the wrapper. A rerun with the same
 TWIX, sequence, output directory, and tag automatically reuses complete,
 current BART maps and echo images. `--resume` may be passed explicitly; use
-`--no-resume` to force reconstruction.
+`--no-resume` to force reconstruction. Complete legacy BART outputs without
+source-path provenance are validated and upgraded in place on their first
+resumed run.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

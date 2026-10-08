@@ -20,6 +20,40 @@ def _read_cfl(base: Path) -> np.ndarray:
 
 
 class BartIoTests(unittest.TestCase):
+    def test_complete_legacy_reconstruction_is_reused_and_manifest_is_upgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            twix = root / "input.dat"
+            sequence = root / "input.seq"
+            twix.touch()
+            sequence.touch()
+            manifest_path = export_wave_inputs(
+                inputs,
+                wave_kspace=np.ones((8, 3, 2, 1, 2), np.complex64),
+                calibrated_psf=np.ones((1, 8, 3, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+            )
+            write_cfl(outputs / "coil_sens_bart", np.ones((4, 3, 2, 2), np.complex64))
+            write_cfl(outputs / "image_wave", np.ones((4, 3, 2), np.complex64))
+
+            self.assertTrue(
+                bart_reconstruction_is_current(
+                    inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
+            provenance = json.loads(manifest_path.read_text(encoding="utf-8"))[
+                "coil_calibration"
+            ]
+            self.assertEqual(provenance["source_twix"], str(twix.resolve()))
+            self.assertEqual(provenance["source_seq"], str(sequence.resolve()))
+            self.assertEqual(
+                provenance["source_provenance"],
+                "inferred-from-complete-current-legacy-outputs",
+            )
+
     def test_complete_reconstruction_is_current_and_truncation_invalidates_it(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -46,6 +80,13 @@ class BartIoTests(unittest.TestCase):
             self.assertTrue(
                 bart_reconstruction_is_current(
                     inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
+            wrong_twix = root / "wrong.dat"
+            wrong_twix.touch()
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs, outputs, source_twix=wrong_twix, source_seq=sequence
                 )
             )
             image.with_suffix(".cfl").write_bytes(b"\x00" * 8)

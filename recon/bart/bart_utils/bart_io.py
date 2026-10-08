@@ -117,15 +117,17 @@ def bart_reconstruction_is_current(
     output_path = Path(output_dir)
     twix_path = Path(source_twix).resolve()
     seq_path = Path(source_seq).resolve()
+    manifest_path = input_path / "manifest.json"
+    legacy_provenance = False
     try:
-        manifest = json.loads(
-            (input_path / "manifest.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         provenance = manifest.get("coil_calibration", {})
-        if provenance.get("source_twix") != str(twix_path):
-            return False
-        if provenance.get("source_seq") != str(seq_path):
-            return False
+        recorded_twix = provenance.get("source_twix")
+        recorded_seq = provenance.get("source_seq")
+        legacy_provenance = recorded_twix is None and recorded_seq is None
+        if not legacy_provenance:
+            if recorded_twix != str(twix_path) or recorded_seq != str(seq_path):
+                return False
         source_latest = max(twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns)
         calib_times = _cfl_pair_times(input_path / "kspace_calib")
         maps_times = _cfl_pair_times(output_path / "coil_sens_bart")
@@ -159,6 +161,23 @@ def bart_reconstruction_is_current(
                 return False
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
+    if legacy_provenance:
+        upgraded_provenance = dict(provenance)
+        upgraded_provenance.update(
+            {
+                "source_twix": str(twix_path),
+                "source_seq": str(seq_path),
+                "source_provenance": "inferred-from-complete-current-legacy-outputs",
+            }
+        )
+        manifest["coil_calibration"] = upgraded_provenance
+        try:
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            # A read-only legacy output can still be reused after full validation.
+            pass
     return True
 
 
