@@ -994,6 +994,12 @@ if isUseMergedInitialZPreFC
     gzInitialFCTargetM1Max = gzInitialMergedTargetM1ByZ(gzInitialFCMaxIdx);
 end
 
+% Actual cosine M0 carried at each ADC center.  This includes the realized
+% parity-aware ADC half-dwell correction and must be translated when the M1
+% reference moves to the next echo center.
+gzCosCenterM0ByEcho = zeros(1, Nechoes);
+gzCosCenterM0ByEcho(1) = gzInitialCosM0ClosureError;
+
 if isUseInterEchoYFC
     for c = 2:Nechoes
         esp_c = TE(c) - TE(c-1);
@@ -1066,6 +1072,14 @@ if isUseInterEchoZFC
             gzInterEchoCosTargetM1AboutTEByEcho(c) = ...
                 -gzInterEchoCosExternalM1AboutTEByEcho(c) ...
                 - gzInterEchoCosEndpointM1CorrectionByEcho(c);
+            % The endpoint term alone closes M1 only when adc.dwell equals
+            % gradRasterTime/2.  Add the mismatch between the actual carried
+            % center M0 and that endpoint baseline.  Algebraically the full
+            % target is -E1_cos + M0_cos(previous)*ESP.
+            gzInterEchoCosTargetM1AboutTEByEcho(c) = ...
+                gzInterEchoCosTargetM1AboutTEByEcho(c) ...
+                +gzCosCenterM0ByEcho(c-1)*esp_c ...
+                +gzInterEchoCosEndpointM1CorrectionByEcho(c);
             gzInterEchoCosTargetM1ByEcho(c) = ...
                 gzInterEchoCosTargetM1AboutTEByEcho(c) ...
                 + t_adc_center * gzInterEchoCosM0ByEcho(c);
@@ -1074,6 +1088,8 @@ if isUseInterEchoZFC
             % target is retained; report/store any mismatch for inspection.
             gzInterEchoCosM0ClosureErrorByEcho(c) = ...
                 gzInterEchoCosExternalM0ByEcho(c) + gzInterEchoCosM0ByEcho(c);
+            gzCosCenterM0ByEcho(c) = gzCosCenterM0ByEcho(c-1) ...
+                +gzInterEchoCosM0ClosureErrorByEcho(c);
         else
             gzInterEchoCosM0ByEcho(c) = 0;
             gzInterEchoCosTargetM1AboutTEByEcho(c) = 0;
