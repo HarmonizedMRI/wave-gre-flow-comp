@@ -108,7 +108,10 @@ This checks the sequence trajectory and definitions without loading imaging data
 8. Only for the explicit SENSE backend, generate and interpolate SigPy ESPIRiT maps.
 9. Load the multi-echo GRE image k-space and apply coil compression on CPU.
 10. For wave data, fit FLASH projection phase deviations, process the fitted PSF coefficients using the selected method, and construct calibrated echo-specific PSFs.
-11. By default, run `bart ecalib`, then `bart wave -w -f -g` for every echo.
+11. By default, run `bart ecalib`, then `bart wave -w -f -g` for every wave
+    echo or `bart pics -l1 -r 1e-5 --fista -i 300 -g -S` for every no-wave
+    echo. Cartesian readout oversampling is removed by centered image-domain
+    cropping before PICS export.
 12. When `--reconstruction-backend sense` is explicitly selected, run the
     legacy wave or no-wave CG-SENSE solver on CPU for each echo.
 13. Save backend-appropriate outputs, diagnostics, and optional NIfTI outputs.
@@ -124,6 +127,7 @@ The full reconstruction is not moved to GPU.
 | Default sensitivity-map calibration | BART `ecalib` |
 | SigPy ESPIRiT | Explicit SENSE backend only |
 | Default Wave reconstruction | BART GPU wavelet/FISTA |
+| Default no-wave reconstruction | BART GPU Cartesian PICS |
 | Explicit legacy Wave/no-wave CG-SENSE | CPU / PyTorch tensor |
 
 ### ESPIRiT selection
@@ -192,7 +196,7 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 | `--espirit-cpu-workers N` | automatic | Limit slice2d process workers |
 | `--cg-iters N` | `50` | Maximum CG iterations |
 | `--cg-tol VALUE` | `1e-6` | Relative CG stopping tolerance |
-| `--reconstruction-backend {bart,sense}` | `bart` | Run BART wavelet/FISTA by default or explicitly opt into local CG-SENSE |
+| `--reconstruction-backend {bart,sense}` | `bart` | Run BART Wave or Cartesian PICS with GPU wavelet/FISTA, or explicitly opt into local CG-SENSE |
 | `--yflip {-1,1}` | sequence-derived | Override LIN PSF sign |
 | `--zflip {-1,1}` | sequence-derived | Override PAR PSF sign |
 | `--psf-coefficient-processing {smooth,sine-line}` | `smooth` | Select PSF coefficient post-processing for wave data |
@@ -280,6 +284,31 @@ k-space norm removed internally by `bart wave`, applies one echo-1 magnitude
 scale to every echo, and does not crop BART's already de-oversampled readout.
 Use `--help` for every supported BART wave flag and the optional direct NIfTI
 option section. Set `BART_BIN` when the executable is not named `bart`.
+
+### BART no-wave Cartesian PICS
+
+For no-wave data, the integrated command is unchanged: automatic mode selects
+the Cartesian path. It crops the oversampled readout in image space before
+exporting `cartesian_kspace[_echo-NN]`, estimates maps with `bart ecalib`, and
+runs `bart pics`. The default PICS options are
+`-l1 -r 1e-5 --fista -i 300 -g -S`; `-S` restores BART's internal scaling, so
+the NIfTI converter does not apply the Wave k-space norm restoration again.
+The standalone equivalent is:
+
+```bash
+recon/bart/run_cartesian_recon.sh \
+    --bart-input /path/to/reconstruction/bart_inputs \
+    --bart-output /path/to/reconstruction/bart_output \
+    --maps-source bart \
+    --twix /path/to/meas_nowave_gre.dat \
+    --seq /path/to/matching_nowave_gre.seq \
+    --save-phase \
+    --ecalib-options -c 0.8 --end-ecalib-options
+```
+
+Pass custom PICS flags between `--pics-options` and `--end-pics-options`.
+Cartesian resume validates source provenance, ecalib/VCC identity, timestamps,
+header dimensions, and exact CFL byte counts before reusing outputs.
 
 For CSM support inspection when anatomical orientation is not required, use
 the lightweight converter without TWIX or sequence inputs:

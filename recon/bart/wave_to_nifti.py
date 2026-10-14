@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert per-echo BART Wave-CAIPI CFL images to geometry-correct NIfTI."""
+"""Convert per-echo BART Wave or Cartesian CFL images to NIfTI."""
 
 from __future__ import annotations
 
@@ -29,7 +29,9 @@ def _parse_bool(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}.")
 
 
-def discover_bart_echoes(input_dir: str | Path, output_dir: str | Path) -> list[dict[str, Any]]:
+def discover_bart_echoes(
+    input_dir: str | Path, output_dir: str | Path
+) -> list[dict[str, Any]]:
     """Resolve matched manifest, k-space, and reconstructed image files."""
 
     input_path = Path(input_dir)
@@ -42,6 +44,28 @@ def discover_bart_echoes(input_dir: str | Path, output_dir: str | Path) -> list[
     if not isinstance(entries, list) or not entries:
         raise ValueError(f"BART manifest contains no echo entries: {manifest_path}")
 
+    reconstruction = manifest.get("reconstruction", {})
+    is_cartesian = (
+        isinstance(reconstruction, dict)
+        and reconstruction.get("mode") == "cartesian"
+    )
+    if is_cartesian:
+        if reconstruction.get("tool") != "pics":
+            raise ValueError("Cartesian BART manifest must use the pics tool.")
+        if reconstruction.get("readout_oversampling_removed") is not True:
+            raise ValueError(
+                "Cartesian BART manifest must confirm readout oversampling removal."
+            )
+        mode = "cartesian"
+        kspace_field = "cartesian_kspace"
+        kspace_prefix = "cartesian_kspace"
+        image_prefix = "image_nowave"
+    else:
+        mode = "wave"
+        kspace_field = "wave_kspace"
+        kspace_prefix = "wave_kspace"
+        image_prefix = "image_wave"
+
     resolved: list[dict[str, Any]] = []
     for expected_echo, entry in enumerate(entries, start=1):
         echo = int(entry.get("echo", -1))
@@ -50,19 +74,19 @@ def discover_bart_echoes(input_dir: str | Path, output_dir: str | Path) -> list[
                 f"BART manifest echoes must be consecutive from 1; "
                 f"expected {expected_echo}, found {echo}."
             )
-        kspace_name = str(entry.get("wave_kspace", ""))
+        kspace_name = str(entry.get(kspace_field, ""))
         expected_name = (
-            "wave_kspace"
+            kspace_prefix
             if len(entries) == 1
-            else f"wave_kspace_echo-{echo:02d}"
+            else f"{kspace_prefix}_echo-{echo:02d}"
         )
         if kspace_name != expected_name:
             raise ValueError(
-                f"Invalid wave_kspace basename for echo {echo}: expected "
+                f"Invalid {kspace_field} basename for echo {echo}: expected "
                 f"{expected_name!r}, found {kspace_name!r}."
             )
-        suffix = kspace_name[len("wave_kspace") :]
-        image_name = f"image_wave{suffix}"
+        suffix = kspace_name[len(kspace_prefix) :]
+        image_name = f"{image_prefix}{suffix}"
         kspace_base = input_path / kspace_name
         image_base = output_path / image_name
         for base in (kspace_base, image_base):
@@ -71,14 +95,17 @@ def discover_bart_echoes(input_dir: str | Path, output_dir: str | Path) -> list[
         resolved.append(
             {
                 "echo": echo,
-                "wave_kspace": kspace_base,
+                "mode": mode,
+                "kspace": kspace_base,
                 "image": image_base,
             }
         )
     return resolved
 
 
-def restore_bart_intensity(image: np.ndarray, wave_kspace: np.ndarray) -> tuple[np.ndarray, float]:
+def restore_bart_intensity(
+    image: np.ndarray, wave_kspace: np.ndarray
+) -> tuple[np.ndarray, float]:
     """Undo the per-input k-space normalization performed by ``bart wave``."""
 
     scale = float(np.linalg.norm(np.asarray(wave_kspace, dtype=np.complex64)))
@@ -89,7 +116,10 @@ def restore_bart_intensity(image: np.ndarray, wave_kspace: np.ndarray) -> tuple[
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert BART Wave-GRE images to NIfTI using matching TWIX/Pulseq geometry.",
+        description=(
+            "Convert BART Wave-GRE or Cartesian GRE images to NIfTI using "
+            "matching TWIX/Pulseq geometry."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--bart-input-dir", required=True)
@@ -151,8 +181,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     expected_shape = (int(cfg["Nx"]), int(cfg["Ny"]), int(cfg["Nz"]))
+    modes = {str(entry["mode"]) for entry in echo_files}
+    if len(modes) != 1:
+        raise ValueError(f"BART manifest mixes reconstruction modes: {sorted(modes)}")
+    reconstruction_mode = modes.pop()
     restored_images: list[np.ndarray] = []
-    kspace_norms: list[float] = []
+    kspace_norms: list[float | None] = []
     for entry in echo_files:
         image = read_cfl(entry["image"])
         if image.ndim != 3:
@@ -165,7 +199,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"BART image for echo {entry['echo']} has shape {image.shape}; "
                 f"expected logical image shape {expected_shape}."
             )
-        restored, norm = restore_bart_intensity(image, read_cfl(entry["wave_kspace"]))
+        if reconstruction_mode == "wave":
+            restored, norm = restore_bart_intensity(
+                image, read_cfl(entry["kspace"])
+            )
+        else:
+            # Cartesian PICS uses -S, so BART has already restored its scale.
+            restored = np.asarray(image, dtype=np.complex64)
+            norm = None
         restored_images.append(restored)
         kspace_norms.append(norm)
 
@@ -198,7 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         metadata = native._build_gre_metadata(
             cfg=cfg,
-            mode="wave",
+            mode="wave" if reconstruction_mode == "wave" else "nowave",
             twix_file=twix_file,
             seq_file=seq_file,
             echo_idx=echo_idx,
@@ -208,21 +249,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         metadata.update(
             {
-                "ReconstructionSoftware": "BART wave",
+                "ReconstructionSoftware": (
+                    "BART wave"
+                    if reconstruction_mode == "wave"
+                    else "BART pics"
+                ),
                 "BARTImageInput": entry["image"].name,
-                "BARTWaveKspaceInput": entry["wave_kspace"].name,
-                "BARTWaveKspaceNormRestored": kspace_norm,
+                "BARTKspaceInput": entry["kspace"].name,
                 "BARTInternalNormalizationRestored": True,
                 "BARTOutputAlreadyReadoutDeoversampled": True,
             }
         )
+        if reconstruction_mode == "wave":
+            metadata["BARTWaveKspaceInput"] = entry["kspace"].name
+            metadata["BARTWaveKspaceNormRestored"] = kspace_norm
+        else:
+            metadata["BARTCartesianKspaceInput"] = entry["kspace"].name
+            metadata["BARTPICSScalingRestoredBySOption"] = True
         native.save_gre_echo_to_nifti(
             image=image,
             twix_file=twix_file,
             out_folder=nifti_out,
             nifti_sub=nifti_sub,
             suffix=nifti_suffix,
-            mode="wave",
+            mode="wave" if reconstruction_mode == "wave" else "nowave",
             echo_idx=echo_idx,
             cfg=cfg,
             save_phase=bool(args.save_phase),

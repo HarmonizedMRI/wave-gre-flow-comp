@@ -1,1 +1,1 @@
-"""BART Wave-CAIPI reconstruction and conversion helpers."""
+"""BART Wave-CAIPI and Cartesian reconstruction/conversion helpers."""

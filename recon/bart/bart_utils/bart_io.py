@@ -1,4 +1,4 @@
-"""BART CFL I/O and Wave-CAIPI input export helpers."""
+"""BART CFL I/O and Wave-CAIPI/Cartesian input export helpers."""
 
 from __future__ import annotations
 
@@ -214,6 +214,124 @@ def bart_reconstruction_is_current(
     return True
 
 
+def bart_cartesian_reconstruction_is_current(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    source_twix: str | Path,
+    source_seq: str | Path,
+    expected_coil_calibration: Mapping[str, Any] | None = None,
+    allow_legacy_provenance: bool = False,
+) -> bool:
+    """Return true when a BART Cartesian reconstruction is complete/current.
+
+    Args:
+        input_dir: Directory containing the Cartesian manifest and CFL pairs.
+        output_dir: Directory containing BART maps and reconstructed images.
+        source_twix: TWIX source that must match recorded provenance.
+        source_seq: Pulseq source that must match recorded provenance.
+        expected_coil_calibration: Optional required coil-calibration fields.
+        allow_legacy_provenance: Permit a manifest without recorded sources.
+
+    Returns:
+        True only when provenance, timestamps, dimensions, and exact CFL byte
+        counts show that the maps and every Cartesian image are reusable.
+
+    Side Effects:
+        Accepted legacy manifests are upgraded in place when writable.
+    """
+
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+    twix_path = Path(source_twix).resolve()
+    seq_path = Path(source_seq).resolve()
+    manifest_path = input_path / "manifest.json"
+    legacy_provenance = False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, Mapping):
+            return False
+        reconstruction = manifest.get("reconstruction")
+        if not isinstance(reconstruction, Mapping):
+            return False
+        if reconstruction.get("mode") != "cartesian" or reconstruction.get("tool") != "pics":
+            return False
+        if reconstruction.get("readout_oversampling_removed") is not True:
+            return False
+
+        provenance = manifest.get("coil_calibration", {})
+        if not isinstance(provenance, Mapping):
+            return False
+        recorded_twix = provenance.get("source_twix")
+        recorded_seq = provenance.get("source_seq")
+        legacy_provenance = recorded_twix is None and recorded_seq is None
+        if legacy_provenance and not allow_legacy_provenance:
+            return False
+        if not legacy_provenance:
+            if recorded_twix != str(twix_path) or recorded_seq != str(seq_path):
+                return False
+            if expected_coil_calibration is not None and any(
+                provenance.get(key) != value
+                for key, value in expected_coil_calibration.items()
+            ):
+                return False
+
+        source_latest = max(twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns)
+        calib_times = _cfl_pair_times(input_path / "kspace_calib")
+        maps_times = _cfl_pair_times(output_path / "coil_sens_bart")
+        if calib_times is None or maps_times is None:
+            return False
+        if maps_times[0] < max(source_latest, calib_times[1]):
+            return False
+
+        echoes = manifest.get("echoes")
+        if not isinstance(echoes, list) or not echoes:
+            return False
+        for expected_echo, entry in enumerate(echoes, start=1):
+            if not isinstance(entry, Mapping):
+                return False
+            if entry.get("echo") != expected_echo:
+                return False
+            kspace_name = entry.get("cartesian_kspace")
+            expected_name = (
+                "cartesian_kspace"
+                if len(echoes) == 1
+                else f"cartesian_kspace_echo-{expected_echo:02d}"
+            )
+            if kspace_name != expected_name:
+                return False
+            suffix = kspace_name[len("cartesian_kspace") :]
+            kspace_times = _cfl_pair_times(input_path / kspace_name)
+            image_times = _cfl_pair_times(output_path / f"image_nowave{suffix}")
+            if kspace_times is None or image_times is None:
+                return False
+            newest_input = max(source_latest, maps_times[1], kspace_times[1])
+            if image_times[0] < newest_input:
+                return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+    if legacy_provenance:
+        upgraded_provenance = dict(provenance)
+        upgraded_provenance.update(
+            {
+                "source_twix": str(twix_path),
+                "source_seq": str(seq_path),
+                "source_provenance": "inferred-from-complete-current-legacy-outputs",
+            }
+        )
+        if expected_coil_calibration is not None:
+            upgraded_provenance.update(dict(expected_coil_calibration))
+        manifest["coil_calibration"] = upgraded_provenance
+        try:
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
+    return True
+
+
 def _complex64(name: str, array: Any, ndim: int) -> np.ndarray:
     result = np.asarray(array, dtype=np.complex64)
     if result.ndim != ndim or any(int(size) < 1 for size in result.shape):
@@ -310,6 +428,85 @@ def export_wave_inputs(
         manifest["psf_calibration"] = psf_calibration
     if coil_calibration is not None:
         manifest["coil_calibration"] = coil_calibration
+    manifest_path = destination / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def export_cartesian_inputs(
+    out_folder: str | Path,
+    *,
+    cartesian_kspace: np.ndarray,
+    coil_sens: np.ndarray | None,
+    kspace_calib: np.ndarray,
+    coil_calibration: Mapping[str, Any] | None = None,
+) -> Path:
+    """Export logical-grid Cartesian arrays for BART ``ecalib`` and ``pics``.
+
+    Args:
+        out_folder: Destination directory for BART CFL pairs and manifest.
+        cartesian_kspace: Readout-deoversampled k-space in
+            ``(sx, sy, sz, echo, coil)`` order.
+        coil_sens: Optional coil maps in ``(coil, sx, sy, sz)`` order.
+        kspace_calib: Calibration k-space in ``(sx, sy, sz, coil)`` order.
+        coil_calibration: Optional JSON-compatible calibration provenance.
+
+    Returns:
+        Path to the generated JSON manifest.
+    """
+
+    destination = Path(out_folder)
+    destination.mkdir(parents=True, exist_ok=True)
+    kspace = _complex64("cartesian_kspace", cartesian_kspace, 5)
+    calib = _complex64("kspace_calib", kspace_calib, 4)
+    sx, sy, sz, necho, nc = map(int, kspace.shape)
+    if calib.shape != (sx, sy, sz, nc):
+        raise ValueError(
+            f"kspace_calib must have shape {(sx, sy, sz, nc)}; got {calib.shape}."
+        )
+
+    exported_maps = None
+    if coil_sens is not None:
+        maps = _complex64("coil_sens", coil_sens, 4)
+        if maps.shape != (nc, sx, sy, sz):
+            raise ValueError(
+                f"coil_sens must have shape {(nc, sx, sy, sz)}; got {maps.shape}."
+            )
+        exported_maps = np.moveaxis(maps, 0, 3)[..., None]
+        write_cfl(destination / "coil_sens", exported_maps)
+
+    write_cfl(destination / "kspace_calib", calib)
+    files: list[dict[str, Any]] = []
+    for echo_index in range(necho):
+        suffix = "" if necho == 1 else f"_echo-{echo_index + 1:02d}"
+        kspace_name = f"cartesian_kspace{suffix}"
+        exported_kspace = kspace[:, :, :, echo_index, :, None]
+        write_cfl(destination / kspace_name, exported_kspace)
+        files.append(
+            {
+                "echo": echo_index + 1,
+                "cartesian_kspace": kspace_name,
+                "cartesian_kspace_shape": list(exported_kspace.shape),
+            }
+        )
+
+    manifest: dict[str, Any] = {
+        "format": "BART CFL",
+        "dimension_order": ["READ", "PHS1", "PHS2", "COIL", "MAPS"],
+        "reconstruction": {
+            "mode": "cartesian",
+            "tool": "pics",
+            "readout_oversampling_removed": True,
+        },
+        "kspace_calib": "kspace_calib",
+        "kspace_calib_shape": list(calib.shape),
+        "echoes": files,
+    }
+    if exported_maps is not None:
+        manifest["coil_sens"] = "coil_sens"
+        manifest["coil_sens_shape"] = list(exported_maps.shape)
+    if coil_calibration is not None:
+        manifest["coil_calibration"] = dict(coil_calibration)
     manifest_path = destination / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path

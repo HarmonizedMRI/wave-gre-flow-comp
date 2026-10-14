@@ -32,14 +32,15 @@ Output
 ------
 * Coil-compressed multi-echo k-space as a complex NumPy array with shape
   ``(Nx_os, Ny, Nz, Necho, Ncc)``.
-* By default, BART Wave-CAIPI images reconstructed with wavelet/FISTA.
+* By default, BART Wave-CAIPI or Cartesian PICS images reconstructed with
+  GPU wavelet/FISTA.
 * With the explicit legacy SENSE backend, reconstructed complex images as one
   NumPy array with shape ``(Nx_os, Ny, Nz, Necho)``.
 * Optional per-echo complex NumPy files.
 * Optional cropped-readout magnitude and phase NIfTI files, one per echo, with
   JSON sidecars.
-* Optional BART CFL inputs for ESPIRiT calibration and Wave-CAIPI
-  reconstruction.
+* Optional BART CFL inputs for ESPIRiT calibration and Wave-CAIPI or
+  Cartesian reconstruction.
 """
 
 from __future__ import annotations
@@ -74,7 +75,12 @@ from utils.coil_compression_kspace import (
     estimate_cc_matrix_coillast,
     remove_readout_oversampling_kspace,
 )
-from bart.bart_utils.bart_io import bart_reconstruction_is_current, export_wave_inputs
+from bart.bart_utils.bart_io import (
+    bart_cartesian_reconstruction_is_current,
+    bart_reconstruction_is_current,
+    export_cartesian_inputs,
+    export_wave_inputs,
+)
 from utils.espirit_calibration import estimate_espirit_maps
 from utils.plot_coil_sens import plot_csm_magnitude_grid, plot_csm_phase_grid
 from utils.psf_coefficient_processing import (
@@ -153,9 +159,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("bart", "sense"),
         default="bart",
         help=(
-            "Reconstruction solver. 'bart' exports Wave-CAIPI inputs and runs "
-            "wavelet/FISTA; 'sense' explicitly selects the legacy local "
-            "CG-SENSE solver."
+            "Reconstruction solver. 'bart' runs Wave-CAIPI for wave data or "
+            "Cartesian PICS for no-wave data with GPU wavelet/FISTA; 'sense' "
+            "explicitly selects the legacy local CG-SENSE solver."
         ),
     )
     resume_group = parser.add_mutually_exclusive_group()
@@ -3190,6 +3196,125 @@ def _run_bart_reconstruction(
     print("Running BART Wave-CAIPI reconstruction with default GPU wavelet/FISTA...")
     subprocess.run(command, check=True)
 
+
+def _run_bart_cartesian_reconstruction(
+    *,
+    bart_input_folder: Path,
+    bart_output_folder: Path,
+    runtime: Mapping[str, Any],
+) -> None:
+    """Run BART PICS for no-wave Cartesian data and optionally save NIfTI."""
+
+    wrapper = Path(__file__).resolve().parent / "bart" / "run_cartesian_recon.sh"
+    command = [
+        "bash",
+        str(wrapper),
+        "--bart-input",
+        str(bart_input_folder),
+        "--bart-output",
+        str(bart_output_folder),
+        "--maps-source",
+        "bart",
+        "--twix",
+        str(runtime["twix_file"]),
+        "--seq",
+        str(runtime["seq_file"]),
+        "--ecalib-options",
+        "-c",
+        f"{float(runtime['espirit_crop']):g}",
+        "--end-ecalib-options",
+    ]
+    if runtime["resume"]:
+        command.append("--resume")
+    if not runtime["save_nifti"]:
+        command.append("--skip-nifti")
+    else:
+        command.extend(["--nifti-output", str(runtime["nifti_out_folder"])])
+        if runtime["save_nifti_phase"]:
+            command.append("--save-phase")
+        command.extend(
+            [
+                "--nifti-options",
+                "--nifti-sub",
+                str(runtime["nifti_sub"]),
+                "--nifti-suffix",
+                str(runtime["nifti_suffix"]),
+                "--nifti-axis-roles",
+                *[str(value) for value in runtime["nifti_axis_roles"]],
+                "--nifti-axis-flips",
+                *[
+                    str(bool(value)).lower()
+                    for value in runtime["nifti_axis_flips"]
+                ],
+                "--twix-coord-system",
+                str(runtime["twix_coord_system"]),
+                "--twix-inplane-rot-sign",
+                str(runtime["twix_inplane_rot_sign"]),
+            ]
+        )
+        if runtime["twix_use_fov_for_voxel_size"]:
+            command.append("--twix-use-fov-for-voxel-size")
+        command.append("--end-nifti-options")
+
+    print("Running BART Cartesian PICS reconstruction with GPU wavelet/FISTA...")
+    subprocess.run(command, check=True)
+
+
+def _remove_cartesian_readout_oversampling(
+    kspace: torch.Tensor,
+    oversampling_factor: int,
+    *,
+    coil_chunk: int = 2,
+) -> torch.Tensor:
+    """Crop no-wave readout FOV in image space using bounded-memory chunks.
+
+    Args:
+        kspace: Coil-compressed Cartesian k-space in
+            ``(RO_os, LIN, PAR, echo, coil)`` order.
+        oversampling_factor: Integer raw-to-logical readout matrix ratio.
+        coil_chunk: Maximum number of coils processed in one FFT chunk.
+
+    Returns:
+        Complex tensor in ``(RO, LIN, PAR, echo, coil)`` order.
+
+    Raises:
+        ValueError: If the input layout, chunk size, or factor is invalid.
+    """
+
+    if kspace.ndim != 5 or not torch.is_complex(kspace):
+        raise ValueError(
+            "Cartesian k-space must be a complex 5D tensor in "
+            "(RO_os, LIN, PAR, echo, coil) order."
+        )
+    if coil_chunk < 1:
+        raise ValueError("coil_chunk must be positive.")
+    factor = int(oversampling_factor)
+    if factor < 1:
+        raise ValueError("oversampling_factor must be positive.")
+    if int(kspace.shape[0]) % factor:
+        raise ValueError(
+            f"Readout length {kspace.shape[0]} is not divisible by "
+            f"oversampling factor {oversampling_factor}."
+        )
+
+    logical_readout = int(kspace.shape[0]) // factor
+    output = torch.empty(
+        (logical_readout, *[int(value) for value in kspace.shape[1:]]),
+        dtype=kspace.dtype,
+        device=kspace.device,
+    )
+    for echo_index in range(int(kspace.shape[3])):
+        for coil_start in range(0, int(kspace.shape[4]), coil_chunk):
+            coil_stop = min(coil_start + coil_chunk, int(kspace.shape[4]))
+            output[:, :, :, echo_index, coil_start:coil_stop] = (
+                remove_readout_oversampling_kspace(
+                    kspace[:, :, :, echo_index, coil_start:coil_stop],
+                    factor,
+                    axis=0,
+                )
+            )
+    return output
+
 # -----------------------------------------------------------------------------
 # Main pipeline
 # -----------------------------------------------------------------------------
@@ -3216,12 +3341,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if runtime["validate_only"]:
         print("Sequence validation completed successfully.")
         return 0
-    if runtime["save_bart_inputs"] and mode != "wave":
-        if runtime["reconstruction_backend"] == "bart":
-            raise ValueError(
-                "The default BART backend requires a wave acquisition. Use "
-                "--reconstruction-backend sense for no-wave data."
-            )
+    if (
+        runtime["save_bart_inputs"]
+        and mode != "wave"
+        and runtime["reconstruction_backend"] != "bart"
+    ):
         raise ValueError("--save-bart-inputs requires a wave acquisition.")
 
     bart_folder = runtime["out_folder"] / (
@@ -3230,20 +3354,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     bart_output_folder = runtime["out_folder"] / (
         "bart_output" + _cache_suffix(runtime["file_tag"])
     )
-    if runtime["resume"] and runtime["reconstruction_backend"] == "bart" and bart_reconstruction_is_current(
-        bart_folder,
-        bart_output_folder,
-        source_twix=runtime["twix_file"],
-        source_seq=runtime["seq_file"],
-        expected_coil_calibration=_bart_coil_calibration_provenance(
-            runtime["espirit_crop"], runtime["ncc"]
-        ),
-        allow_legacy_provenance=(
-            np.isclose(runtime["espirit_crop"], 0.8) and runtime["ncc"] == 12
-        ),
-    ):
+    resume_checker = (
+        bart_reconstruction_is_current
+        if mode == "wave"
+        else bart_cartesian_reconstruction_is_current
+    )
+    resume_is_current = (
+        runtime["resume"]
+        and runtime["reconstruction_backend"] == "bart"
+        and resume_checker(
+            bart_folder,
+            bart_output_folder,
+            source_twix=runtime["twix_file"],
+            source_seq=runtime["seq_file"],
+            expected_coil_calibration=_bart_coil_calibration_provenance(
+                runtime["espirit_crop"], runtime["ncc"]
+            ),
+            allow_legacy_provenance=(
+                mode == "wave"
+                and np.isclose(runtime["espirit_crop"], 0.8)
+                and runtime["ncc"] == 12
+            ),
+        )
+    )
+    if resume_is_current:
         print("Resume: current BART reconstruction is complete; skipping TWIX preprocessing.")
-        _run_bart_reconstruction(
+        bart_runner = (
+            _run_bart_reconstruction
+            if mode == "wave"
+            else _run_bart_cartesian_reconstruction
+        )
+        bart_runner(
             bart_input_folder=bart_folder,
             bart_output_folder=bart_output_folder,
             runtime=runtime,
@@ -3406,6 +3547,56 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print("Reconstruction completed successfully.")
                 return 0
+    elif runtime["reconstruction_backend"] == "bart":
+        print(
+            "Removing Cartesian readout oversampling by centered image-domain "
+            "cropping..."
+        )
+        cartesian_kspace = _remove_cartesian_readout_oversampling(
+            kspace_cc,
+            int(cfg["os_factor"]),
+        )
+        del kspace_cc
+        gc.collect()
+        kspace_calib = _build_bart_calibration_kspace(
+            twix_file=runtime["twix_file"],
+            cfg=cfg,
+            wcc=wcc,
+            logical_acs=logical_acs,
+        )
+        manifest_path = export_cartesian_inputs(
+            bart_folder,
+            cartesian_kspace=cartesian_kspace.numpy(),
+            coil_sens=None,
+            kspace_calib=kspace_calib,
+            coil_calibration={
+                "source": "integrated refscan set 4",
+                "source_twix": str(runtime["twix_file"].resolve()),
+                "source_seq": str(runtime["seq_file"].resolve()),
+                **_bart_coil_calibration_provenance(
+                    runtime["espirit_crop"], runtime["ncc"]
+                ),
+                "readout_oversampling_removal": {
+                    **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
+                    "input_readout": int(cfg["Nx_os"]),
+                    "output_readout": int(cfg["Nx"]),
+                    "oversampling_factor": int(cfg["os_factor"]),
+                },
+                "kspace_calib_shape": list(kspace_calib.shape),
+                "finite": bool(np.isfinite(kspace_calib).all()),
+            },
+        )
+        del cartesian_kspace
+        gc.collect()
+        print(f"Saved BART Cartesian inputs: {manifest_path}")
+        _run_bart_cartesian_reconstruction(
+            bart_input_folder=bart_folder,
+            bart_output_folder=bart_output_folder,
+            runtime=runtime,
+        )
+        print(f"Saved BART Cartesian reconstruction under: {bart_output_folder}")
+        print("Reconstruction completed successfully.")
+        return 0
     if csm_full is None:
         raise RuntimeError("The SENSE backend requires SigPy sensitivity maps.")
     sens = _build_sensitivity_tensor(csm_full, cfg)

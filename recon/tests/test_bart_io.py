@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from recon.bart.bart_utils.bart_io import (
+    bart_cartesian_reconstruction_is_current,
     bart_reconstruction_is_current,
+    export_cartesian_inputs,
     export_wave_inputs,
     read_cfl,
     write_cfl,
@@ -20,6 +22,79 @@ def _read_cfl(base: Path) -> np.ndarray:
 
 
 class BartIoTests(unittest.TestCase):
+    def test_cartesian_export_and_resume_validate_exact_cfl_size(self) -> None:
+        """Cartesian resume should require provenance and complete PICS output."""
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            twix = root / "input.dat"
+            sequence = root / "input.seq"
+            twix.touch()
+            sequence.touch()
+            calibration = {
+                "bart_ecalib": {"maps": 1, "crop": 0.5},
+                "coil_compression": {"virtual_coils": 2},
+            }
+            manifest_path = export_cartesian_inputs(
+                inputs,
+                cartesian_kspace=np.ones((4, 3, 2, 2, 2), np.complex64),
+                coil_sens=None,
+                kspace_calib=np.ones((4, 3, 2, 2), np.complex64),
+                coil_calibration={
+                    **calibration,
+                    "source_twix": str(twix.resolve()),
+                    "source_seq": str(sequence.resolve()),
+                },
+            )
+            write_cfl(
+                outputs / "coil_sens_bart",
+                np.ones((4, 3, 2, 2), np.complex64),
+            )
+            write_cfl(
+                outputs / "image_nowave_echo-01",
+                np.ones((4, 3, 2), np.complex64),
+            )
+            image = write_cfl(
+                outputs / "image_nowave_echo-02",
+                np.ones((4, 3, 2), np.complex64),
+            )
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["reconstruction"],
+                {
+                    "mode": "cartesian",
+                    "tool": "pics",
+                    "readout_oversampling_removed": True,
+                },
+            )
+            self.assertEqual(
+                [entry["cartesian_kspace"] for entry in manifest["echoes"]],
+                ["cartesian_kspace_echo-01", "cartesian_kspace_echo-02"],
+            )
+            self.assertTrue(
+                bart_cartesian_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
+            )
+
+            image.with_suffix(".cfl").write_bytes(b"\x00" * 8)
+            self.assertFalse(
+                bart_cartesian_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
+            )
+
     def test_complete_legacy_reconstruction_is_reused_and_manifest_is_upgraded(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -31,6 +31,7 @@ class BartWaveToNiftiTests(unittest.TestCase):
             )
             resolved = discover_bart_echoes(inputs, outputs)
             self.assertEqual([item["echo"] for item in resolved], [1, 2])
+            self.assertEqual({item["mode"] for item in resolved}, {"wave"})
             self.assertEqual(resolved[1]["image"].name, "image_wave_echo-02")
 
     def test_restores_bart_kspace_norm(self) -> None:
@@ -39,6 +40,54 @@ class BartWaveToNiftiTests(unittest.TestCase):
         restored, scale = restore_bart_intensity(image, kspace)
         self.assertAlmostEqual(scale, np.sqrt(12.0), places=6)
         np.testing.assert_allclose(restored, image * np.sqrt(12.0))
+
+    def test_discovers_multi_echo_cartesian_outputs(self) -> None:
+        """Cartesian manifests should resolve all PICS inputs without a PSF."""
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            outputs = root / "outputs"
+            inputs.mkdir()
+            outputs.mkdir()
+            entries = []
+            for echo in (1, 2):
+                suffix = f"_echo-{echo:02d}"
+                kspace_name = f"cartesian_kspace{suffix}"
+                write_cfl(
+                    inputs / kspace_name,
+                    np.ones((2, 2, 2, 1, 1), np.complex64),
+                )
+                write_cfl(
+                    outputs / f"image_nowave{suffix}",
+                    np.ones((2, 2, 2, 1, 1), np.complex64),
+                )
+                entries.append(
+                    {"echo": echo, "cartesian_kspace": kspace_name}
+                )
+            (inputs / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "reconstruction": {
+                            "mode": "cartesian",
+                            "tool": "pics",
+                            "readout_oversampling_removed": True,
+                        },
+                        "echoes": entries,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            resolved = discover_bart_echoes(inputs, outputs)
+            self.assertEqual([item["echo"] for item in resolved], [1, 2])
+            self.assertEqual({item["mode"] for item in resolved}, {"cartesian"})
+            self.assertEqual(
+                resolved[1]["image"].name, "image_nowave_echo-02"
+            )
+            self.assertEqual(
+                resolved[1]["kspace"].name, "cartesian_kspace_echo-02"
+            )
 
 
 if __name__ == "__main__":

@@ -137,6 +137,49 @@ class GrePsfCalibrationTests(unittest.TestCase):
         self.assertEqual(command[crop_index + 1], "0.5")
         run.assert_called_once_with(command, check=True)
 
+    def test_integrated_cartesian_command_forwards_espirit_crop(self) -> None:
+        """The no-wave BART backend must pass crop through ecalib options."""
+
+        runtime = {
+            "twix_file": Path("/tmp/input.dat"),
+            "seq_file": Path("/tmp/input.seq"),
+            "espirit_crop": 0.5,
+            "resume": False,
+            "save_nifti": False,
+        }
+        with patch.object(native.subprocess, "run") as run:
+            native._run_bart_cartesian_reconstruction(
+                bart_input_folder=Path("/tmp/bart_inputs"),
+                bart_output_folder=Path("/tmp/bart_output"),
+                runtime=runtime,
+            )
+
+        command = run.call_args.args[0]
+        options_index = command.index("--ecalib-options")
+        self.assertEqual(
+            command[options_index + 1 : options_index + 4],
+            ["-c", "0.5", "--end-ecalib-options"],
+        )
+        run.assert_called_once_with(command, check=True)
+
+    def test_cartesian_readout_crop_matches_full_tensor_operation(self) -> None:
+        """Chunked no-wave cropping should preserve every echo and coil."""
+
+        generator = torch.Generator().manual_seed(7)
+        real = torch.randn((8, 3, 2, 2, 3), generator=generator)
+        imag = torch.randn((8, 3, 2, 2, 3), generator=generator)
+        kspace = torch.complex(real, imag)
+        expected = native.remove_readout_oversampling_kspace(
+            kspace, 2, axis=0
+        )
+
+        actual = native._remove_cartesian_readout_oversampling(
+            kspace, 2, coil_chunk=1
+        )
+
+        self.assertEqual(tuple(actual.shape), (4, 3, 2, 2, 3))
+        torch.testing.assert_close(actual, expected)
+
     def test_config_separates_measured_counts_from_global_label_extents(self) -> None:
         """Sparse global LIN/PAR labels must retain their mapVBVD extents."""
 

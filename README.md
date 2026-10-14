@@ -57,7 +57,8 @@ Optional scanner-safety checks can use Safe PNS Prediction, a scanner `.asc` fil
 
 - Python 3.11
 - CPU reconstruction dependencies defined in `pyproject.toml`
-- GPU-enabled BART and an NVIDIA GPU for the default `bart wave -g` path
+- GPU-enabled BART and an NVIDIA GPU for the default `bart wave -g` or
+  `bart pics -g` path
 - Optional CUDA 12-compatible CuPy only for GPU SigPy ESPIRiT in the explicit SENSE path
 
 Current device behavior:
@@ -67,6 +68,7 @@ Current device behavior:
 | Coil-compression estimation and application | CPU |
 | Default sensitivity-map calibration | BART `ecalib`; SigPy ESPIRiT is skipped |
 | Default Wave reconstruction | BART GPU wavelet/FISTA (`-w -f -g`) |
+| Default no-wave reconstruction | BART Cartesian PICS (`-l1 -r 1e-5 --fista -i 300 -g -S`) |
 | Explicit legacy Wave/no-wave CG-SENSE | CPU |
 
 A GPU is optional. With `--espirit-device auto`, the reconstruction uses a compatible visible GPU when available and otherwise falls back to CPU. For acquisitions with more than 32 physical receiver channels, consider `--espirit-device cpu` when GPU memory is limited or CPU resources are more suitable.
@@ -222,10 +224,12 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
 ```
 
 Wave acquisitions export the calibrated PSF, coil-compressed k-space, and ACS
-in BART CFL format by default. They skip SigPy ESPIRiT, run BART `ecalib`, and
-then run GPU wavelet/FISTA reconstruction. Select `--reconstruction-backend sense` only
-when the traditional local CG-SENSE solver is required. The companion
-`recon/bart/run_wave_recon.sh` can also be run independently. NIfTI conversion
+in BART CFL format by default, then run BART `ecalib` and `wave`. No-wave
+acquisitions remove readout oversampling with centered image-domain cropping,
+export logical-grid Cartesian k-space, and run BART `ecalib` and GPU `pics`
+with `-S`. Select `--reconstruction-backend sense` only when the traditional
+local CG-SENSE solver is required. The companion `recon/bart/run_wave_recon.sh`
+and `recon/bart/run_cartesian_recon.sh` wrappers can also be run independently. NIfTI conversion
 is enabled by default and can be disabled with `--no-save-nifti` in the
 integrated command or `--skip-nifti` in the wrapper. A rerun with the same
 TWIX, sequence, output directory, and tag automatically reuses complete,
