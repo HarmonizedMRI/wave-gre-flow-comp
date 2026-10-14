@@ -353,7 +353,7 @@ class GrePsfCalibrationTests(unittest.TestCase):
         """The BART exporter must embed corrected ACS without RO striding."""
 
         ref, expected = self._refscan_with_outside_fov_signal()
-        with patch.object(native, "load_ref", return_value=ref):
+        with patch.object(native, "load_ref_set", return_value=ref[:, :, :, 4, :]):
             actual = native._build_bart_calibration_kspace(
                 twix_file=Path("input.dat"),
                 cfg=self._coil_cfg(),

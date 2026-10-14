@@ -92,7 +92,10 @@ from utils.psf_coefficient_processing import (
     sine_line_model,
 )
 from utils.psf_wrapped_phase_fit import fit_wrapped_phase_planes, smooth_1d_nan
-from utils.twix_import import load_img, load_ref
+from utils.twix_import import (
+    load_img_coil_compressed,
+    load_ref_set,
+)
 from utils.wave_cg_sense_precondition import (
     cg_sense_wave,
     fft3call,
@@ -1002,13 +1005,34 @@ def _load_logical_integrated_acs(
         Complex64 logical-readout ACS in coil-last order.
     """
 
-    ref = _check_integrated_refscan_shape(
-        load_ref(str(twix_file)),
-        ncalib1=int(cfg["Ncalib1"]),
-        nacs=int(cfg["Nacs"]),
-        nsets=int(cfg["Nsets"]),
+    nacs = int(cfg["Nacs"])
+    selected = load_ref_set(
+        str(twix_file),
+        int(cfg["ACSSetID"]),
+        lin_count=nacs,
+        par_count=nacs,
     )
-    return _logical_integrated_acs(ref, cfg)
+    expected = (int(cfg["Nx_os"]), nacs, nacs)
+    if tuple(selected.shape[:3]) != expected:
+        raise ValueError(
+            "Unexpected selected integrated ACS shape: "
+            f"received {tuple(selected.shape)}, expected "
+            f"{(*expected, 'physical_coils')}."
+        )
+    logical = remove_readout_oversampling_kspace(
+        selected,
+        int(cfg["os_factor"]),
+        axis=0,
+    )
+    expected_logical = (int(cfg["Nx"]), nacs, nacs, int(selected.shape[-1]))
+    if tuple(logical.shape) != expected_logical:
+        raise ValueError(
+            "Unexpected logical integrated ACS shape after readout crop: "
+            f"received {tuple(logical.shape)}, expected {expected_logical}."
+        )
+    if not torch.isfinite(logical).all():
+        raise ValueError("Logical integrated ACS contains non-finite values.")
+    return logical.contiguous()
 
 
 def _array_sha256(array: np.ndarray | torch.Tensor) -> str:
@@ -1808,16 +1832,34 @@ def fit_wave_psf_deviation_from_projection(
         a fourth evidence mapping is appended. This fit is independent of GRE
         echo number and is shared by all echo-specific PSFs.
     """
-    ref = _check_integrated_refscan_shape(
-        load_ref(str(twix_file)),
-        ncalib1=int(cfg["Ncalib1"]),
-        nacs=int(cfg["Nacs"]),
-        nsets=int(cfg["Nsets"]),
-    )
     nx_os = int(cfg["Nx_os"])
     ncalib1 = int(cfg["Ncalib1"])
     ncalib2 = int(cfg["Ncalib2"])
     nproj = ncalib1 * ncalib2
+    projection_ref = {
+        "sin": (
+            load_ref_set(
+                str(twix_file), 0, lin_count=ncalib1, par_count=ncalib2
+            ),
+            load_ref_set(
+                str(twix_file), 1, lin_count=ncalib1, par_count=ncalib2
+            ),
+        ),
+        "cos": (
+            load_ref_set(
+                str(twix_file), 2, lin_count=ncalib2, par_count=ncalib1
+            ),
+            load_ref_set(
+                str(twix_file), 3, lin_count=ncalib2, par_count=ncalib1
+            ),
+        ),
+    }
+    if any(
+        int(array.shape[0]) != nx_os
+        for pair in projection_ref.values()
+        for array in pair
+    ):
+        raise ValueError("Projection REFSCAN readout does not match sequence Nx_os.")
     if calib_lines.shape != (3, _calibration_readout_count(cfg), nx_os):
         raise ValueError(
             f"Unexpected calibration trajectory shape {calib_lines.shape}; expected "
@@ -1837,8 +1879,7 @@ def fit_wave_psf_deviation_from_projection(
     for wave_mode in ("sin", "cos"):
         print(f"Calibrating {wave_mode} projection")
         if wave_mode == "sin":
-            kspace_nowave = ref[:, :ncalib1, :1, 0, :]
-            kspace_wave = ref[:, :ncalib1, :1, 1, :]
+            kspace_nowave, kspace_wave = projection_ref["sin"]
             set_lines = calib_lines[:, nproj : 2 * nproj, :]
             delta_ky = set_lines[1, ncalib1 // 2]
             delta_ky_idx = delta_ky * fov_y
@@ -1849,8 +1890,7 @@ def fit_wave_psf_deviation_from_projection(
             ).astype(np.complex64)[..., None]
             tag = "projy"
         else:
-            kspace_nowave = ref[:, :1, :ncalib1, 2, :]
-            kspace_wave = ref[:, :1, :ncalib1, 3, :]
+            kspace_nowave, kspace_wave = projection_ref["cos"]
             set_lines = calib_lines[:, 3 * nproj : 4 * nproj, :]
             delta_kz = set_lines[2, ncalib1 // 2]
             delta_kz_idx = delta_kz * fov_z
@@ -3453,14 +3493,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             espirit_cpu_workers=runtime["espirit_cpu_workers"],
         )
 
-    print("Importing GRE image data from integrated TWIX file...")
-    img = _normalize_gre_image_data(load_img(str(runtime["twix_file"])), cfg)
-    ncoil = int(img.shape[-1])
-    print(f"Normalized image shape: {tuple(img.shape)}")
+    print(
+        "Importing and coil-compressing GRE image data in bounded PAR chunks..."
+    )
+    kspace_cc, acquired_image_shape, ncoil = load_img_coil_compressed(
+        str(runtime["twix_file"]),
+        wcc,
+        output_shape=(
+            int(cfg["Nx_os"]),
+            int(cfg["Ny"]),
+            int(cfg["Nz"]),
+            int(cfg["Necho"]),
+        ),
+        par_chunk=1,
+    )
+    print(f"Acquired physical-coil image shape: {acquired_image_shape}")
+    print(f"Compressed padded image shape: {tuple(kspace_cc.shape)}")
     geometry_diagnostics = _report_seq_twix_geometry(
         twix_file=runtime["twix_file"],
         cfg=cfg,
-        received_image_shape=tuple(int(v) for v in img.shape),
+        received_image_shape=tuple(int(v) for v in acquired_image_shape),
         voxel_size_mm=nifti_voxel_size_mm,
         twix_array_axis_roles=runtime["nifti_axis_roles"],
         twix_array_axis_flips=runtime["nifti_axis_flips"],
@@ -3471,29 +3523,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             f"Image/refscan coil-count mismatch: image has {ncoil}, refscan has {ncoil_ref}."
         )
-    effective_ncc = int(wcc.shape[1])
-    kspace_cc = torch.zeros(
-        (
-            int(cfg["Nx_os"]),
-            int(cfg["Ny"]),
-            int(cfg["Nz"]),
-            int(cfg["Necho"]),
-            effective_ncc,
-        ),
-        dtype=torch.complex64,
-    )
-    for echo_idx in range(int(cfg["Necho"])):
-        print(f"Coil-compressing echo {echo_idx + 1}/{cfg['Necho']}...")
-        compressed_acquired = apply_cc_coillast_torch(
-            img[:, :, :, echo_idx, :],
-            wcc,
-            x_chunk=8,
-        )
-        kspace_cc[
-            :, : img.shape[1], : img.shape[2], echo_idx, :
-        ] = compressed_acquired
-        del compressed_acquired
-    del img
     gc.collect()
     stem = _recon_stem(cfg, mode, runtime["file_tag"])
     if runtime["reconstruction_backend"] == "sense":
