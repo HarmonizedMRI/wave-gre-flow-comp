@@ -104,6 +104,170 @@ def _cfl_pair_times(path: str | Path) -> tuple[int, int] | None:
     return min(mtimes), max(mtimes)
 
 
+def bart_reconstruction_inputs_are_current(
+    input_dir: str | Path,
+    *,
+    source_twix: str | Path,
+    source_seq: str | Path,
+    expected_coil_calibration: Mapping[str, Any] | None = None,
+    allow_legacy_provenance: bool = False,
+) -> bool:
+    """Return true when Wave BART inputs can safely resume an interrupted job.
+
+    Args:
+        input_dir: Directory containing the BART input manifest and CFL pairs.
+        source_twix: TWIX source that must match recorded provenance.
+        source_seq: Pulseq source that must match recorded provenance.
+        expected_coil_calibration: Optional required coil-calibration fields.
+        allow_legacy_provenance: Permit manifests without recorded sources.
+            This should remain false for partial resume because incomplete
+            outputs cannot corroborate inferred legacy provenance.
+
+    Returns:
+        True only when provenance, timestamps, manifest basenames, dimensions,
+        and exact CFL byte counts validate every required Wave input.
+    """
+
+    input_path = Path(input_dir)
+    twix_path = Path(source_twix).resolve()
+    seq_path = Path(source_seq).resolve()
+    try:
+        manifest = json.loads(
+            (input_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(manifest, Mapping):
+            return False
+        provenance = manifest.get("coil_calibration", {})
+        if not isinstance(provenance, Mapping):
+            return False
+        recorded_twix = provenance.get("source_twix")
+        recorded_seq = provenance.get("source_seq")
+        legacy_provenance = recorded_twix is None and recorded_seq is None
+        if legacy_provenance and not allow_legacy_provenance:
+            return False
+        if not legacy_provenance:
+            if recorded_twix != str(twix_path) or recorded_seq != str(seq_path):
+                return False
+            if expected_coil_calibration is not None and any(
+                provenance.get(key) != value
+                for key, value in expected_coil_calibration.items()
+            ):
+                return False
+
+        source_latest = max(
+            twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns
+        )
+        calib_times = _cfl_pair_times(input_path / "kspace_calib")
+        if calib_times is None or calib_times[0] < source_latest:
+            return False
+        echoes = manifest.get("echoes")
+        if not isinstance(echoes, list) or not echoes:
+            return False
+        for expected_echo, entry in enumerate(echoes, start=1):
+            if not isinstance(entry, Mapping) or entry.get("echo") != expected_echo:
+                return False
+            expected_suffix = "" if len(echoes) == 1 else f"_echo-{expected_echo:02d}"
+            kspace_name = entry.get("wave_kspace")
+            psf_name = entry.get("psf")
+            if kspace_name != f"wave_kspace{expected_suffix}":
+                return False
+            if psf_name != f"psf{expected_suffix}":
+                return False
+            kspace_times = _cfl_pair_times(input_path / kspace_name)
+            psf_times = _cfl_pair_times(input_path / psf_name)
+            if kspace_times is None or psf_times is None:
+                return False
+            if min(kspace_times[0], psf_times[0]) < source_latest:
+                return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def bart_cartesian_inputs_are_current(
+    input_dir: str | Path,
+    *,
+    source_twix: str | Path,
+    source_seq: str | Path,
+    expected_coil_calibration: Mapping[str, Any] | None = None,
+    allow_legacy_provenance: bool = False,
+) -> bool:
+    """Return true when Cartesian inputs can resume an interrupted PICS job.
+
+    Args:
+        input_dir: Directory containing the Cartesian manifest and CFL pairs.
+        source_twix: TWIX source that must match recorded provenance.
+        source_seq: Pulseq source that must match recorded provenance.
+        expected_coil_calibration: Optional required coil-calibration fields.
+        allow_legacy_provenance: Permit manifests without recorded sources.
+
+    Returns:
+        True only when provenance, timestamps, manifest basenames, dimensions,
+        and exact CFL byte counts validate every required Cartesian input.
+    """
+
+    input_path = Path(input_dir)
+    twix_path = Path(source_twix).resolve()
+    seq_path = Path(source_seq).resolve()
+    try:
+        manifest = json.loads(
+            (input_path / "manifest.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(manifest, Mapping):
+            return False
+        reconstruction = manifest.get("reconstruction")
+        if not isinstance(reconstruction, Mapping):
+            return False
+        if reconstruction.get("mode") != "cartesian":
+            return False
+        if reconstruction.get("tool") != "pics":
+            return False
+        if reconstruction.get("readout_oversampling_removed") is not True:
+            return False
+        provenance = manifest.get("coil_calibration", {})
+        if not isinstance(provenance, Mapping):
+            return False
+        recorded_twix = provenance.get("source_twix")
+        recorded_seq = provenance.get("source_seq")
+        legacy_provenance = recorded_twix is None and recorded_seq is None
+        if legacy_provenance and not allow_legacy_provenance:
+            return False
+        if not legacy_provenance:
+            if recorded_twix != str(twix_path) or recorded_seq != str(seq_path):
+                return False
+            if expected_coil_calibration is not None and any(
+                provenance.get(key) != value
+                for key, value in expected_coil_calibration.items()
+            ):
+                return False
+
+        source_latest = max(
+            twix_path.stat().st_mtime_ns, seq_path.stat().st_mtime_ns
+        )
+        calib_times = _cfl_pair_times(input_path / "kspace_calib")
+        if calib_times is None or calib_times[0] < source_latest:
+            return False
+        echoes = manifest.get("echoes")
+        if not isinstance(echoes, list) or not echoes:
+            return False
+        for expected_echo, entry in enumerate(echoes, start=1):
+            if not isinstance(entry, Mapping) or entry.get("echo") != expected_echo:
+                return False
+            expected_name = (
+                "cartesian_kspace"
+                if len(echoes) == 1
+                else f"cartesian_kspace_echo-{expected_echo:02d}"
+            )
+            if entry.get("cartesian_kspace") != expected_name:
+                return False
+            kspace_times = _cfl_pair_times(input_path / expected_name)
+            if kspace_times is None or kspace_times[0] < source_latest:
+                return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def bart_reconstruction_is_current(
     input_dir: str | Path,
     output_dir: str | Path,

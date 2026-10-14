@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from recon.bart.bart_utils.bart_io import (
+    bart_cartesian_inputs_are_current,
     bart_cartesian_reconstruction_is_current,
+    bart_reconstruction_inputs_are_current,
     bart_reconstruction_is_current,
     export_cartesian_inputs,
     export_wave_inputs,
@@ -47,6 +49,23 @@ class BartIoTests(unittest.TestCase):
                     "source_twix": str(twix.resolve()),
                     "source_seq": str(sequence.resolve()),
                 },
+            )
+            self.assertTrue(
+                bart_cartesian_inputs_are_current(
+                    inputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
+            )
+            self.assertFalse(
+                bart_cartesian_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
             )
             write_cfl(
                 outputs / "coil_sens_bart",
@@ -89,6 +108,23 @@ class BartIoTests(unittest.TestCase):
                 bart_cartesian_reconstruction_is_current(
                     inputs,
                     outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
+            )
+            self.assertTrue(
+                bart_cartesian_inputs_are_current(
+                    inputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration=calibration,
+                )
+            )
+            (inputs / "cartesian_kspace_echo-01.cfl").write_bytes(b"\x00" * 8)
+            self.assertFalse(
+                bart_cartesian_inputs_are_current(
+                    inputs,
                     source_twix=twix,
                     source_seq=sequence,
                     expected_coil_calibration=calibration,
@@ -247,6 +283,18 @@ class BartIoTests(unittest.TestCase):
                     "source_seq": str(sequence.resolve()),
                 },
             )
+            self.assertTrue(
+                bart_reconstruction_inputs_are_current(
+                    inputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                )
+            )
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
             write_cfl(outputs / "coil_sens_bart", np.ones((4, 3, 2, 2), np.complex64))
             image = write_cfl(outputs / "image_wave", np.ones((4, 3, 2), np.complex64))
 
@@ -266,6 +314,21 @@ class BartIoTests(unittest.TestCase):
             self.assertFalse(
                 bart_reconstruction_is_current(
                     inputs, outputs, source_twix=twix, source_seq=sequence
+                )
+            )
+            self.assertTrue(
+                bart_reconstruction_inputs_are_current(
+                    inputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                )
+            )
+            (inputs / "psf.cfl").write_bytes(b"\x00" * 8)
+            self.assertFalse(
+                bart_reconstruction_inputs_are_current(
+                    inputs,
+                    source_twix=twix,
+                    source_seq=sequence,
                 )
             )
 

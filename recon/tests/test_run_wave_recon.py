@@ -235,6 +235,19 @@ set -euo pipefail
         self.assertIn("Resume: reusing current BART ESPIRiT maps", result.stdout)
         self.assertIn("Resume: reusing current BART image", result.stdout)
 
+    def test_resume_rejects_truncated_wave_output(self) -> None:
+        """A nonempty but undersized Wave image must be reconstructed again."""
+
+        command = self._base_command("bart") + ["--skip-nifti"]
+        subprocess.run(command, check=True, env=self.environment)
+        (self.bart_output / "image_wave.cfl").write_bytes(b"\x00")
+        self.bart_log.unlink()
+
+        subprocess.run(command + ["--resume"], check=True, env=self.environment)
+
+        calls = _read_calls(self.bart_log)
+        self.assertEqual(calls[-1][0], "wave")
+
     def test_rejects_wavelet_and_llr_together(self) -> None:
         command = self._base_command("existing") + [
             "--wave-options",

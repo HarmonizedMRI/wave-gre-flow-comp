@@ -233,7 +233,9 @@ and `recon/bart/run_cartesian_recon.sh` wrappers can also be run independently. 
 is enabled by default and can be disabled with `--no-save-nifti` in the
 integrated command or `--skip-nifti` in the wrapper. A rerun with the same
 TWIX, sequence, output directory, and tag automatically reuses complete,
-current BART maps and echo images. `--resume` may be passed explicitly; use
+current BART maps and echo images. If BART was killed after input export,
+validated modern BART inputs skip TWIX preprocessing and resume missing maps
+or echo images in place. `--resume` may be passed explicitly; use
 `--no-resume` to force reconstruction. Complete legacy BART outputs without
 source-path provenance are validated and upgraded in place on their first
 resumed run.

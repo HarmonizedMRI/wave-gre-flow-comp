@@ -107,17 +107,42 @@ require_value() {
 }
 
 require_cfl_pair() {
-    [[ -f "$1.hdr" && -f "$1.cfl" ]] ||
-        fail "Missing BART CFL pair: $1.{hdr,cfl}"
+    cfl_pair_is_complete "$1" ||
+        fail "Missing, malformed, or truncated BART CFL pair: $1.{hdr,cfl}"
+}
+
+cfl_pair_is_complete() {
+    local base="$1"
+    python3 - "$base" <<'PY'
+import math
+import pathlib
+import sys
+
+base = pathlib.Path(sys.argv[1])
+header = base.with_suffix(".hdr")
+data = base.with_suffix(".cfl")
+try:
+    line = next(
+        value.strip()
+        for value in header.read_text(encoding="utf-8").splitlines()
+        if value.strip() and not value.lstrip().startswith("#")
+    )
+    dimensions = [int(value) for value in line.split()]
+    valid = bool(dimensions) and all(value > 0 for value in dimensions)
+    valid = valid and data.stat().st_size == math.prod(dimensions) * 8
+except (FileNotFoundError, OSError, StopIteration, ValueError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+PY
 }
 
 cfl_pair_is_current() {
     local output="$1"
     shift
-    [[ -s "$output.hdr" && -s "$output.cfl" ]] || return 1
+    cfl_pair_is_complete "$output" || return 1
     local input
     for input in "$@"; do
-        [[ -f "$input.hdr" && -f "$input.cfl" ]] || return 1
+        cfl_pair_is_complete "$input" || return 1
         [[ ! "$input.hdr" -nt "$output.hdr" ]] || return 1
         [[ ! "$input.hdr" -nt "$output.cfl" ]] || return 1
         [[ ! "$input.cfl" -nt "$output.hdr" ]] || return 1

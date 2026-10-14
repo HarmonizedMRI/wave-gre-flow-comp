@@ -76,7 +76,9 @@ from utils.coil_compression_kspace import (
     remove_readout_oversampling_kspace,
 )
 from bart.bart_utils.bart_io import (
+    bart_cartesian_inputs_are_current,
     bart_cartesian_reconstruction_is_current,
+    bart_reconstruction_inputs_are_current,
     bart_reconstruction_is_current,
     export_cartesian_inputs,
     export_wave_inputs,
@@ -3359,6 +3361,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if mode == "wave"
         else bart_cartesian_reconstruction_is_current
     )
+    inputs_checker = (
+        bart_reconstruction_inputs_are_current
+        if mode == "wave"
+        else bart_cartesian_inputs_are_current
+    )
     resume_is_current = (
         runtime["resume"]
         and runtime["reconstruction_backend"] == "bart"
@@ -3377,8 +3384,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         )
     )
-    if resume_is_current:
-        print("Resume: current BART reconstruction is complete; skipping TWIX preprocessing.")
+    resume_inputs_are_current = (
+        runtime["resume"]
+        and runtime["reconstruction_backend"] == "bart"
+        and not resume_is_current
+        and inputs_checker(
+            bart_folder,
+            source_twix=runtime["twix_file"],
+            source_seq=runtime["seq_file"],
+            expected_coil_calibration=_bart_coil_calibration_provenance(
+                runtime["espirit_crop"], runtime["ncc"]
+            ),
+            allow_legacy_provenance=False,
+        )
+    )
+    if resume_is_current or resume_inputs_are_current:
+        if resume_is_current:
+            print(
+                "Resume: current BART reconstruction is complete; skipping "
+                "TWIX preprocessing."
+            )
+        else:
+            print(
+                "Resume: current BART inputs are complete; skipping TWIX "
+                "preprocessing and resuming missing BART outputs."
+            )
         bart_runner = (
             _run_bart_reconstruction
             if mode == "wave"
@@ -3389,7 +3419,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             bart_output_folder=bart_output_folder,
             runtime=runtime,
         )
-        print("Resume completed without rerunning BART reconstruction.")
+        if resume_is_current:
+            print("Resume completed without rerunning BART reconstruction.")
+        else:
+            print("Interrupted BART reconstruction resumed from current inputs.")
         return 0
 
     logical_acs = None
