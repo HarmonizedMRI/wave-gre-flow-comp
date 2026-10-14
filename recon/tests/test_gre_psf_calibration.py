@@ -47,6 +47,24 @@ class GrePsfCalibrationTests(unittest.TestCase):
             ):
                 self.assertEqual(native._build_arg_parser().parse_args().ncc, 16)
 
+    def test_no_vcc_cli_disables_compression_and_is_mutually_exclusive(self) -> None:
+        """The no-VCC switch should retain all coils and reject a count."""
+
+        base = ["recon", "--twix", "input.dat", "--seq", "input.seq", "--out", "out"]
+        for option in ("--no-coil-compression", "--no-vcc"):
+            with self.subTest(option=option), patch.object(
+                sys, "argv", base + [option]
+            ):
+                self.assertTrue(
+                    native._build_arg_parser().parse_args().no_coil_compression
+                )
+        with patch.object(
+            sys,
+            "argv",
+            base + ["--no-vcc", "--vcc-channels", "16"],
+        ), self.assertRaises(SystemExit):
+            native._build_arg_parser().parse_args()
+
     def test_bart_provenance_records_virtual_coil_count(self) -> None:
         """BART resume identity must distinguish different compression sizes."""
 
@@ -56,6 +74,46 @@ class GrePsfCalibrationTests(unittest.TestCase):
             ],
             {"virtual_coils": 16},
         )
+        self.assertEqual(
+            native._bart_coil_calibration_provenance(0.5, 0)[
+                "coil_compression"
+            ],
+            {"mode": "identity", "virtual_coils": "all"},
+        )
+
+    def test_no_vcc_builds_identity_basis_without_estimating_pca(self) -> None:
+        """Disabling compression should preserve every physical channel."""
+
+        logical_acs = torch.ones((4, 2, 2, 3), dtype=torch.complex64)
+        cfg = {"Nx": 4, "Nx_os": 8, "os_factor": 2}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            twix = root / "input.dat"
+            twix.touch()
+            with patch.object(
+                native, "_load_logical_integrated_acs", return_value=logical_acs
+            ), patch.object(native, "estimate_cc_matrix_coillast") as estimate:
+                wcc, returned_acs, ncoil = (
+                    native.load_or_generate_coil_compression_for_bart(
+                        twix_file=twix,
+                        cfg=cfg,
+                        out_folder=root,
+                        file_tag="",
+                        ncc=0,
+                        reuse_coil_calib=False,
+                    )
+                )
+
+            estimate.assert_not_called()
+            self.assertEqual(ncoil, 3)
+            self.assertIs(returned_acs, logical_acs)
+            np.testing.assert_array_equal(wcc, np.eye(3, dtype=np.complex64))
+            self.assertTrue(
+                (
+                    root
+                    / "coil_compression_matrix_nccall_roimgcrop-v1.npy"
+                ).is_file()
+            )
 
     def test_integrated_bart_command_forwards_espirit_crop(self) -> None:
         """The integrated BART backend must pass its crop to the wrapper."""

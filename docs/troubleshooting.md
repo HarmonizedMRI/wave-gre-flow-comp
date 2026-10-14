@@ -354,6 +354,10 @@ Lower `--coil-compression-channels` to a value no greater than the number of
 coils in the integrated refscan. The default is 12; `--vcc-channels` and
 `--ncc` are equivalent aliases.
 
+`--no-vcc` retains every physical receiver channel and therefore cannot solve
+an excessive-channel-count memory error; it generally increases calibration
+and reconstruction memory requirements.
+
 ## Memory and runtime
 
 ### Out-of-memory error

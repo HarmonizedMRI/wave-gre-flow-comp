@@ -235,6 +235,8 @@ source-path provenance are validated and upgraded in place on their first
 resumed run.
 The virtual-coil count is configurable with `--coil-compression-channels N`;
 `--vcc-channels` and the existing `--ncc` spelling are equivalent aliases.
+Use `--no-vcc` (alias `--no-coil-compression`) to bypass SVD compression and
+retain all physical channels. This can substantially increase BART memory use.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

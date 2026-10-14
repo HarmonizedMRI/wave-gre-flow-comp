@@ -172,7 +172,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Force TWIX preprocessing and BART reconstruction to run again.",
     )
     parser.set_defaults(resume=True)
-    parser.add_argument(
+    coil_group = parser.add_mutually_exclusive_group()
+    coil_group.add_argument(
         "--coil-compression-channels",
         "--vcc-channels",
         "--ncc",
@@ -180,6 +181,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         help="Number of virtual coils retained after coil compression.",
+    )
+    coil_group.add_argument(
+        "--no-coil-compression",
+        "--no-vcc",
+        dest="no_coil_compression",
+        action="store_true",
+        help="Disable SVD coil compression and retain every physical receiver channel.",
     )
     parser.add_argument(
         "--reuse-coil-calib",
@@ -438,7 +446,7 @@ def _collect_runtime_config(argv: Sequence[str] | None = None) -> dict[str, Any]
         "out_folder": out_folder,
         "file_tag": _sanitize_token(args.file_tag),
         "mode": args.mode,
-        "ncc": int(args.ncc),
+        "ncc": 0 if args.no_coil_compression else int(args.ncc),
         "reuse_coil_calib": bool(args.reuse_coil_calib),
         "espirit_device": args.espirit_device,
         "espirit_gpu_index": int(args.espirit_gpu_index),
@@ -1048,7 +1056,7 @@ def _coil_calibration_contract(
         twix_file: Integrated Wave-GRE TWIX source.
         cfg: Validated GRE sequence configuration.
         logical_acs: Alias-free logical set-4 ACS.
-        ncc: Requested number of virtual coils.
+        ncc: Requested number of virtual coils, or zero for identity coils.
         espirit_calib_mode: Selected ESPIRiT backend.
         espirit_crop: ESPIRiT eigenvalue crop threshold.
 
@@ -1057,6 +1065,15 @@ def _coil_calibration_contract(
     """
 
     source = twix_file.stat()
+    physical_coils = int(logical_acs.shape[-1])
+    effective_ncc = _resolve_virtual_coil_count(ncc, physical_coils)
+    compression_contract = {
+        "physical_coils": physical_coils,
+        "virtual_coils": effective_ncc,
+        "readout_stride": 1,
+    }
+    if int(ncc) == 0:
+        compression_contract["mode"] = "identity"
     return {
         "format_version": COIL_CALIBRATION_CACHE_FORMAT_VERSION,
         "status": "alias_free_gre_coil_calibration_ready",
@@ -1085,11 +1102,7 @@ def _coil_calibration_contract(
             "shape": list(logical_acs.shape),
             "sha256": _array_sha256(logical_acs),
         },
-        "coil_compression": {
-            "physical_coils": int(logical_acs.shape[-1]),
-            "virtual_coils": int(ncc),
-            "readout_stride": 1,
-        },
+        "coil_compression": compression_contract,
         "espirit": {
             "mode": _normalize_espirit_calib_mode(espirit_calib_mode),
             "crop": float(espirit_crop),
@@ -1103,6 +1116,61 @@ def _coil_calibration_contract(
 
 def _cache_suffix(file_tag: str) -> str:
     return f"_{file_tag}" if file_tag else ""
+
+
+def _coil_compression_provenance(ncc: int) -> dict[str, Any]:
+    """Return a stable identity for compressed or uncompressed coil data.
+
+    Args:
+        ncc: Requested virtual-coil count, or zero to retain all physical coils.
+
+    Returns:
+        JSON-compatible coil-compression identity.
+    """
+
+    ncc = int(ncc)
+    if ncc == 0:
+        return {"mode": "identity", "virtual_coils": "all"}
+    if ncc < 0:
+        raise ValueError("ncc cannot be negative.")
+    return {"virtual_coils": ncc}
+
+
+def _resolve_virtual_coil_count(ncc: int, ncoil: int) -> int:
+    """Resolve zero-as-all into the effective number of retained channels.
+
+    Args:
+        ncc: Requested virtual-coil count, or zero for all physical channels.
+        ncoil: Available physical receiver channels.
+
+    Returns:
+        Effective output channel count.
+
+    Raises:
+        ValueError: If the request is negative or exceeds ``ncoil``.
+    """
+
+    ncc = int(ncc)
+    ncoil = int(ncoil)
+    if ncc == 0:
+        return ncoil
+    if ncc < 0 or ncc > ncoil:
+        raise ValueError(
+            f"Requested ncc={ncc}, but the TWIX refscan has {ncoil} coils."
+        )
+    return ncc
+
+
+def _identity_coil_basis(ncoil: int) -> np.ndarray:
+    """Return an identity physical-to-virtual coil basis without compression."""
+
+    return np.eye(int(ncoil), dtype=np.complex64)
+
+
+def _ncc_cache_label(ncc: int) -> str:
+    """Return ``all`` for identity coils or the requested numeric count."""
+
+    return "all" if int(ncc) == 0 else str(int(ncc))
 
 
 def _normalize_espirit_calib_mode(mode: str) -> str:
@@ -1122,21 +1190,22 @@ def _coil_cache_paths(
     mode = _normalize_espirit_calib_mode(espirit_calib_mode)
     calibration = f"_{COIL_CALIBRATION_CACHE_TAG}"
     csm_mode = "" if mode == "3d" else "_slice2d"
+    ncc_label = _ncc_cache_label(ncc)
     return {
         "wcc": out_folder
-        / f"coil_compression_matrix_ncc{ncc}{calibration}{suffix}.npy",
+        / f"coil_compression_matrix_ncc{ncc_label}{calibration}{suffix}.npy",
         "wcc_bart_manifest": out_folder
-        / f"coil_compression_bart_ncc{ncc}{calibration}{suffix}.json",
+        / f"coil_compression_bart_ncc{ncc_label}{calibration}{suffix}.json",
         "csm_low": out_folder
-        / f"csm_acs_ncc{ncc}{csm_mode}{calibration}{suffix}.npy",
+        / f"csm_acs_ncc{ncc_label}{csm_mode}{calibration}{suffix}.npy",
         "csm_full": out_folder
-        / f"csm_full_ncc{ncc}{csm_mode}{calibration}{suffix}.npy",
+        / f"csm_full_ncc{ncc_label}{csm_mode}{calibration}{suffix}.npy",
         "csm_mag": out_folder
-        / f"csm_full_mag_ncc{ncc}{csm_mode}{calibration}{suffix}.png",
+        / f"csm_full_mag_ncc{ncc_label}{csm_mode}{calibration}{suffix}.png",
         "csm_phase": out_folder
-        / f"csm_full_phase_ncc{ncc}{csm_mode}{calibration}{suffix}.png",
+        / f"csm_full_phase_ncc{ncc_label}{csm_mode}{calibration}{suffix}.png",
         "manifest": out_folder
-        / f"coil_calibration_ncc{ncc}{csm_mode}{calibration}{suffix}.json",
+        / f"coil_calibration_ncc{ncc_label}{csm_mode}{calibration}{suffix}.json",
     }
 
 
@@ -1277,6 +1346,7 @@ def load_or_generate_coil_sens(
         print("Loading cached coil-compression matrix and sensitivity maps...")
         logical_acs = _load_logical_integrated_acs(twix_file, cfg)
         ncoil = int(logical_acs.shape[-1])
+        effective_ncc = _resolve_virtual_coil_count(ncc, ncoil)
         expected_contract = _coil_calibration_contract(
             twix_file=twix_file,
             cfg=cfg,
@@ -1293,7 +1363,9 @@ def load_or_generate_coil_sens(
         )
         wcc = np.load(paths["wcc"], allow_pickle=False)
         csm_full = np.load(paths["csm_full"], allow_pickle=False)
-        _check_cc_and_csm(wcc, csm_full, ncoil=ncoil, ncc=ncc, cfg=cfg)
+        _check_cc_and_csm(
+            wcc, csm_full, ncoil=ncoil, ncc=effective_ncc, cfg=cfg
+        )
         if not np.isfinite(wcc).all() or not np.isfinite(csm_full).all():
             raise ValueError("Cached coil calibration contains non-finite values.")
         print(
@@ -1336,14 +1408,11 @@ def load_or_generate_coil_compression_for_bart(
     ncc: int,
     reuse_coil_calib: bool,
 ) -> tuple[np.ndarray, torch.Tensor, int]:
-    """Prepare only Wcc and logical ACS; BART ecalib estimates the maps."""
+    """Prepare a requested or identity coil basis and logical ACS for BART."""
 
     logical_acs = _load_logical_integrated_acs(twix_file, cfg)
     ncoil = int(logical_acs.shape[-1])
-    if ncc > ncoil:
-        raise ValueError(
-            f"Requested ncc={ncc}, but the TWIX refscan has only {ncoil} coils."
-        )
+    effective_ncc = _resolve_virtual_coil_count(ncc, ncoil)
     paths = _coil_cache_paths(out_folder, file_tag, ncc, "3d")
     source = twix_file.stat()
     contract = {
@@ -1359,8 +1428,9 @@ def load_or_generate_coil_compression_for_bart(
         },
         "coil_compression": {
             "physical_coils": ncoil,
-            "virtual_coils": int(ncc),
+            "virtual_coils": effective_ncc,
             "readout_stride": 1,
+            **({"mode": "identity"} if int(ncc) == 0 else {}),
         },
         "readout_oversampling_removal": {
             **COIL_CALIBRATION_READOUT_OVERSAMPLING_REMOVAL,
@@ -1389,10 +1459,11 @@ def load_or_generate_coil_compression_for_bart(
                 "TWIX source, logical ACS, or compression contract."
             )
         wcc = np.load(paths["wcc"], allow_pickle=False)
-        if wcc.shape != (ncoil, ncc) or not np.isfinite(wcc).all():
+        if wcc.shape != (ncoil, effective_ncc) or not np.isfinite(wcc).all():
             raise ValueError(
                 "Cached coil compression matrix is incompatible with the "
-                f"current ACS: received {wcc.shape}, expected {(ncoil, ncc)}."
+                f"current ACS: received {wcc.shape}, expected "
+                f"{(ncoil, effective_ncc)}."
             )
     else:
         if reuse_coil_calib:
@@ -1402,13 +1473,20 @@ def load_or_generate_coil_compression_for_bart(
                     "folder or file tag rather than mixing cache generations."
                 )
             print("No compatible Wcc cache found; recomputing from logical ACS.")
-        wcc, _, cc_energy = estimate_cc_matrix_coillast(
-            logical_acs,
-            ncc=ncc,
-            acs=min(int(logical_acs.shape[1]), int(logical_acs.shape[2])),
-        )
+        if int(ncc) == 0:
+            wcc = _identity_coil_basis(ncoil)
+            print(f"Coil compression disabled: retaining all {ncoil} channels.")
+        else:
+            wcc, _, cc_energy = estimate_cc_matrix_coillast(
+                logical_acs,
+                ncc=effective_ncc,
+                acs=min(int(logical_acs.shape[1]), int(logical_acs.shape[2])),
+            )
+            print(
+                f"Energy retained by {effective_ncc} coils: "
+                f"{float(cc_energy[effective_ncc - 1]):.6f}"
+            )
         print(f"Coil-compression matrix: {wcc.shape}")
-        print(f"Energy retained by {ncc} coils: {float(cc_energy[ncc - 1]):.6f}")
         np.save(paths["wcc"], np.asarray(wcc))
         print(f"Saved coil compression matrix: {paths['wcc']}")
         cache_manifest = {
@@ -1473,21 +1551,27 @@ def generate_coil_sens(
     kspace_acs = _load_logical_integrated_acs(twix_file, cfg)
     nacs = int(cfg["Nacs"])
     nx, ny_acs, nz_acs, ncoil = map(int, kspace_acs.shape)
-    if ncc > ncoil:
-        raise ValueError(f"Requested ncc={ncc}, but the TWIX refscan has only {ncoil} coils.")
+    effective_ncc = _resolve_virtual_coil_count(ncc, ncoil)
     if nx != int(cfg["Nx"]):
         raise ValueError(
             f"Logical ACS readout {nx} does not match sequence Nx={cfg['Nx']}."
         )
     print(f"Alias-free logical integrated ACS shape: {tuple(kspace_acs.shape)}")
 
-    wcc, _, cc_energy = estimate_cc_matrix_coillast(
-        kspace_acs,
-        ncc=ncc,
-        acs=min(ny_acs, nz_acs),
-    )
+    if int(ncc) == 0:
+        wcc = _identity_coil_basis(ncoil)
+        print(f"Coil compression disabled: retaining all {ncoil} channels.")
+    else:
+        wcc, _, cc_energy = estimate_cc_matrix_coillast(
+            kspace_acs,
+            ncc=effective_ncc,
+            acs=min(ny_acs, nz_acs),
+        )
+        print(
+            f"Energy retained by {effective_ncc} coils: "
+            f"{float(cc_energy[effective_ncc - 1]):.6f}"
+        )
     print(f"Coil-compression matrix: {wcc.shape}")
-    print(f"Energy retained by {ncc} coils: {float(cc_energy[ncc - 1]):.6f}")
 
     kspace_np = (
         kspace_acs.permute(3, 0, 1, 2)
@@ -3031,7 +3115,7 @@ def _bart_coil_calibration_provenance(
 
     Args:
         espirit_crop: BART ecalib eigenvalue crop threshold.
-        ncc: Number of virtual coils retained after coil compression.
+        ncc: Number of virtual coils, or zero when compression is disabled.
 
     Returns:
         Manifest fields that identify the BART map-calibration settings.
@@ -3042,7 +3126,7 @@ def _bart_coil_calibration_provenance(
             "maps": 1,
             "crop": float(espirit_crop),
         },
-        "coil_compression": {"virtual_coils": int(ncc)},
+        "coil_compression": _coil_compression_provenance(ncc),
     }
 
 
@@ -3213,13 +3297,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             f"Image/refscan coil-count mismatch: image has {ncoil}, refscan has {ncoil_ref}."
         )
+    effective_ncc = int(wcc.shape[1])
     kspace_cc = torch.zeros(
         (
             int(cfg["Nx_os"]),
             int(cfg["Ny"]),
             int(cfg["Nz"]),
             int(cfg["Necho"]),
-            runtime["ncc"],
+            effective_ncc,
         ),
         dtype=torch.complex64,
     )
