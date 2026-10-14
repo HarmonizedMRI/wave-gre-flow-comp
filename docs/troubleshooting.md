@@ -350,7 +350,9 @@ or rerun without:
 
 ### Requested `ncc` exceeds physical coil count
 
-Lower `--ncc` to a value no greater than the number of coils in the integrated refscan. The default is 12.
+Lower `--coil-compression-channels` to a value no greater than the number of
+coils in the integrated refscan. The default is 12; `--vcc-channels` and
+`--ncc` are equivalent aliases.
 
 ## Memory and runtime
 

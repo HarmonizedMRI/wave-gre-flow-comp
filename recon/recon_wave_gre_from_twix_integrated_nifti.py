@@ -173,7 +173,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(resume=True)
     parser.add_argument(
+        "--coil-compression-channels",
+        "--vcc-channels",
         "--ncc",
+        dest="ncc",
         type=int,
         default=12,
         help="Number of virtual coils retained after coil compression.",
@@ -3021,11 +3024,14 @@ def save_gre_echo_to_nifti(
     return saved
 
 
-def _bart_coil_calibration_provenance(espirit_crop: float) -> dict[str, Any]:
+def _bart_coil_calibration_provenance(
+    espirit_crop: float, ncc: int
+) -> dict[str, Any]:
     """Return the BART sensitivity-estimation identity used for safe resume.
 
     Args:
         espirit_crop: BART ecalib eigenvalue crop threshold.
+        ncc: Number of virtual coils retained after coil compression.
 
     Returns:
         Manifest fields that identify the BART map-calibration settings.
@@ -3035,7 +3041,8 @@ def _bart_coil_calibration_provenance(espirit_crop: float) -> dict[str, Any]:
         "bart_ecalib": {
             "maps": 1,
             "crop": float(espirit_crop),
-        }
+        },
+        "coil_compression": {"virtual_coils": int(ncc)},
     }
 
 
@@ -3145,9 +3152,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_twix=runtime["twix_file"],
         source_seq=runtime["seq_file"],
         expected_coil_calibration=_bart_coil_calibration_provenance(
-            runtime["espirit_crop"]
+            runtime["espirit_crop"], runtime["ncc"]
         ),
-        allow_legacy_provenance=np.isclose(runtime["espirit_crop"], 0.8),
+        allow_legacy_provenance=(
+            np.isclose(runtime["espirit_crop"], 0.8) and runtime["ncc"] == 12
+        ),
     ):
         print("Resume: current BART reconstruction is complete; skipping TWIX preprocessing.")
         _run_bart_reconstruction(
@@ -3283,7 +3292,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "source_twix": str(runtime["twix_file"].resolve()),
                     "source_seq": str(runtime["seq_file"].resolve()),
                     **(
-                        _bart_coil_calibration_provenance(runtime["espirit_crop"])
+                        _bart_coil_calibration_provenance(
+                            runtime["espirit_crop"], runtime["ncc"]
+                        )
                         if runtime["reconstruction_backend"] == "bart"
                         else {}
                     ),

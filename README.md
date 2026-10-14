@@ -216,6 +216,7 @@ uv run python recon/recon_wave_gre_from_twix_integrated_nifti.py \
     --seq /path/to/matching_wave_gre.seq \
     --out /path/to/reconstruction \
     --wave-mode auto \
+    --coil-compression-channels 12 \
     --espirit-device auto \
     --save-nifti-phase
 ```
@@ -232,6 +233,8 @@ current BART maps and echo images. `--resume` may be passed explicitly; use
 `--no-resume` to force reconstruction. Complete legacy BART outputs without
 source-path provenance are validated and upgraded in place on their first
 resumed run.
+The virtual-coil count is configurable with `--coil-compression-channels N`;
+`--vcc-channels` and the existing `--ncc` spelling are equivalent aliases.
 See [Reconstruction](docs/reconstruction.md#bart-wave-caipi-input-export) for
 dimensions and usage.
 

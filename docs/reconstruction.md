@@ -182,7 +182,7 @@ When `--espirit-cpu-workers` is omitted, Joblib selects the available physical-c
 |---|---:|---|
 | `--wave-mode {auto,wave,nowave}` | `auto` | Select or detect the image reconstruction model |
 | `--file-tag TEXT` | empty | Append a sanitized tag to cache and result filenames |
-| `--ncc N` | `12` | Number of virtual coils retained |
+| `--coil-compression-channels N` (`--vcc-channels`, `--ncc`) | `12` | Number of virtual coils retained; cache and resume provenance include this value |
 | `--reuse-coil-calib` | off | Reuse compatible cached coil compression and CSM files |
 | `--espirit-device {auto,cpu,gpu}` | `auto` | Select ESPIRiT execution device |
 | `--espirit-gpu-index N` | `0` | Select CUDA GPU index |

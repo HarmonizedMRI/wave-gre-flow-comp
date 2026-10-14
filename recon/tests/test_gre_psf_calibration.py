@@ -37,6 +37,26 @@ def _quality(length: int) -> dict[str, dict[str, np.ndarray]]:
 
 
 class GrePsfCalibrationTests(unittest.TestCase):
+    def test_virtual_coil_count_accepts_all_supported_cli_names(self) -> None:
+        """Canonical and compatibility names should configure the same value."""
+
+        base = ["recon", "--twix", "input.dat", "--seq", "input.seq", "--out", "out"]
+        for option in ("--coil-compression-channels", "--vcc-channels", "--ncc"):
+            with self.subTest(option=option), patch.object(
+                sys, "argv", base + [option, "16"]
+            ):
+                self.assertEqual(native._build_arg_parser().parse_args().ncc, 16)
+
+    def test_bart_provenance_records_virtual_coil_count(self) -> None:
+        """BART resume identity must distinguish different compression sizes."""
+
+        self.assertEqual(
+            native._bart_coil_calibration_provenance(0.5, 16)[
+                "coil_compression"
+            ],
+            {"virtual_coils": 16},
+        )
+
     def test_integrated_bart_command_forwards_espirit_crop(self) -> None:
         """The integrated BART backend must pass its crop to the wrapper."""
 

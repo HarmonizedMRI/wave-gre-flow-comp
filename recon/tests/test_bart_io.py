@@ -120,6 +120,7 @@ class BartIoTests(unittest.TestCase):
                     "source_twix": str(twix.resolve()),
                     "source_seq": str(sequence.resolve()),
                     "bart_ecalib": {"maps": 1, "crop": 0.8},
+                    "coil_compression": {"virtual_coils": 2},
                 },
             )
             write_cfl(
@@ -135,6 +136,18 @@ class BartIoTests(unittest.TestCase):
                     source_seq=sequence,
                     expected_coil_calibration={
                         "bart_ecalib": {"maps": 1, "crop": 0.5}
+                    },
+                )
+            )
+            self.assertFalse(
+                bart_reconstruction_is_current(
+                    inputs,
+                    outputs,
+                    source_twix=twix,
+                    source_seq=sequence,
+                    expected_coil_calibration={
+                        "bart_ecalib": {"maps": 1, "crop": 0.8},
+                        "coil_compression": {"virtual_coils": 3},
                     },
                 )
             )
